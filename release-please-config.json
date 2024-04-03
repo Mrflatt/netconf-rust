@@ -32,7 +32,7 @@
     }
   ],
   "packages": {
-    "netconf-rust": {
+    "netconf-async": {
       "changelog-path": "CHANGELOG.md"
     },
     "netconf-cli": {
