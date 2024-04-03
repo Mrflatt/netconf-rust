@@ -1,14 +1,15 @@
 use crate::message;
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type NetconfClientResult<T> = Result<T, NetconfClientError>;
 
 #[derive(Debug, Error)]
-pub enum Error {
+pub enum NetconfClientError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[cfg(feature = "async-ssh2-lite")]
     #[error(transparent)]
-    Ssh(#[from] ssh2::Error),
+    Ssh(#[from] async_ssh2_lite::Error),
     #[error(transparent)]
     SerializingFailure(#[from] quick_xml::DeError),
     #[error("remote procedure call failed:\n{0}")]
@@ -24,4 +25,12 @@ pub enum Error {
         actual
     )]
     MalformedChunk { expected: char, actual: char },
+    #[error(transparent)]
+    Anyhow(#[from] anyhow::Error),
+}
+
+impl NetconfClientError {
+    pub fn new(msg: String) -> Self {
+        NetconfClientError::Anyhow(anyhow::Error::msg(msg))
+    }
 }

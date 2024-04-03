@@ -1,93 +1,41 @@
-use crate::error::{Error, Result};
+use crate::error::{NetconfClientError, NetconfClientResult};
+use crate::framer::{Framer, NETCONF_1_0_TERMINATOR};
+use async_trait::async_trait;
+use log::debug;
 use memmem::{Searcher, TwoWaySearcher};
-use std::io::{Read, Write};
-
-const NETCONF_1_0_TERMINATOR: &str = "]]>]]>";
-const NETCONF_1_1_TERMINATOR: &str = "##";
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Trait for NETCONF message framing
 /// See [RFC6242](https://tools.ietf.org/html/rfc6242#section-4.1)
-pub(crate) struct Framer {
+pub struct AsyncFramer<T> {
     read_buffer: Vec<u8>,
-    upgraded: bool,
+    upgraded: AtomicBool,
+
+    channel: T,
 }
 
-impl Framer {
-    pub(crate) fn new() -> Framer {
-        Framer {
+impl<T: AsyncRead + AsyncWrite + Unpin> AsyncFramer<T> {
+    pub fn new(channel: T) -> Self {
+        AsyncFramer {
             read_buffer: Vec::new(),
-            upgraded: false,
+            upgraded: AtomicBool::new(false),
+            channel,
         }
     }
 
-    pub(crate) fn upgrade(&mut self) {
-        self.upgraded = true;
-    }
-
-    pub(crate) fn read_xml<R>(&mut self, mut from: R) -> Result<String>
-    where
-        R: Read,
-    {
-        if self.upgraded {
-            loop {
-                let chunk_size: u32 = self.read_header(&mut from)?;
-                if chunk_size == 0 {
-                    break;
-                }
-                let mut buffer = vec![0u8; chunk_size as usize];
-                from.read(&mut buffer)?;
-                self.read_buffer.extend(&buffer);
-            }
-            let response = String::from_utf8_lossy(&self.read_buffer).to_string();
-            self.read_buffer.drain(..);
-            Ok(response)
-        } else {
-            let mut buffer = [0u8; 128];
-            let search = TwoWaySearcher::new(NETCONF_1_0_TERMINATOR.as_bytes());
-            while search.search_in(&self.read_buffer).is_none() {
-                let bytes = from.read(&mut buffer)?;
-                self.read_buffer.extend(&buffer[..bytes]);
-            }
-            let pos = search.search_in(&self.read_buffer).unwrap();
-            let resp = String::from_utf8_lossy(&self.read_buffer[..pos]).to_string();
-            self.read_buffer.drain(0..(pos + 6));
-            Ok(resp.trim().to_string())
-        }
-    }
-
-    pub(crate) fn write_xml<T>(&mut self, rpc: &str, mut to: T) -> Result<()>
-    where
-        T: Write,
-    {
-        if self.upgraded {
-            write!(
-                to,
-                "\n#{}\n{}\n{}\n",
-                rpc.len(),
-                rpc,
-                NETCONF_1_1_TERMINATOR
-            )?;
-        } else {
-            write!(to, "{}{}", rpc, NETCONF_1_0_TERMINATOR)?;
-        }
-        Ok(())
-    }
-
-    fn read_header<R>(&mut self, mut from: R) -> Result<u32>
-    where
-        R: Read,
-    {
+    async fn read_header(&mut self) -> NetconfClientResult<u32> {
         let mut buffer = [0u8; 2];
-        from.read_exact(&mut buffer)?;
+        self.channel.read_exact(&mut buffer).await?;
         if buffer[0] != b'\n' {
-            return Err(Error::MalformedChunk {
+            return Err(NetconfClientError::MalformedChunk {
                 expected: '\n',
                 actual: buffer[0].into(),
             });
         }
 
         if buffer[1] != b'#' {
-            return Err(Error::MalformedChunk {
+            return Err(NetconfClientError::MalformedChunk {
                 expected: '#',
                 actual: buffer[1].into(),
             });
@@ -97,7 +45,7 @@ impl Framer {
         let mut last_read: u8;
         loop {
             let mut buffer = [0u8; 1];
-            from.read_exact(&mut buffer)?;
+            self.channel.read_exact(&mut buffer).await?;
             last_read = buffer[0];
             if last_read == b'#' {
                 continue;
@@ -105,8 +53,8 @@ impl Framer {
             if last_read == b'\n' {
                 return Ok(chunk_size);
             }
-            if last_read < b'0' || last_read > b'9' {
-                return Err(Error::MalformedChunk {
+            if !last_read.is_ascii_digit() {
+                return Err(NetconfClientError::MalformedChunk {
                     expected: '0',
                     actual: last_read.into(),
                 });
@@ -116,17 +64,71 @@ impl Framer {
     }
 }
 
+#[async_trait]
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Framer for AsyncFramer<T> {
+    async fn upgrade(&mut self) {
+        self.upgraded.store(true, Ordering::Relaxed);
+    }
+
+    async fn read_async(&mut self) -> NetconfClientResult<String> {
+        if self.upgraded.load(Ordering::Relaxed) {
+            loop {
+                let chunk_size: u32 = self.read_header().await?;
+                if chunk_size == 0 {
+                    break;
+                }
+                let mut buffer = vec![0u8; chunk_size as usize];
+                self.channel.read_exact(&mut buffer).await?;
+                self.read_buffer.extend(&buffer);
+            }
+            let response = String::from_utf8_lossy(&self.read_buffer)
+                .trim_end()
+                .to_string();
+            self.read_buffer.drain(..);
+            Ok(response)
+        } else {
+            let mut buffer = [0u8; 256];
+            let search = TwoWaySearcher::new(NETCONF_1_0_TERMINATOR.as_bytes());
+            while search.search_in(&self.read_buffer).is_none() {
+                let bytes = self.channel.read(&mut buffer).await?;
+                self.read_buffer.extend(&buffer[..bytes]);
+            }
+            let pos = search.search_in(&self.read_buffer).unwrap();
+            let resp = String::from_utf8_lossy(&self.read_buffer[..pos])
+                .trim_end()
+                .to_string();
+            self.read_buffer.drain(0..(pos + 6));
+            Ok(resp)
+        }
+    }
+
+    async fn write_async(&mut self, rpc: &str) -> NetconfClientResult<()> {
+        debug!("RPC:\n{}", rpc);
+        let bytes = rpc.as_bytes();
+        if self.upgraded.load(Ordering::Relaxed) {
+            self.channel
+                .write_all(format!("\n#{}\n", bytes.len()).as_bytes())
+                .await?;
+            self.channel.write_all(bytes).await?;
+            self.channel.write_all("\n##\n".as_bytes()).await?;
+        } else {
+            self.channel.write_all(bytes).await?;
+            self.channel
+                .write_all(NETCONF_1_0_TERMINATOR.as_bytes())
+                .await?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use std::io::Cursor;
 
-    #[test]
-    fn test_chunked_framer() {
-        let mut framer = Framer::new();
-        framer.upgrade();
-
+    #[tokio::test]
+    async fn test_chunked_framer() {
         let rpc_error = r#"
 #38
 <?xml version="1.0" encoding="UTF-8"?>
@@ -211,8 +213,11 @@ mod tests {
 
 "#
         .to_string();
-        let channel = Cursor::new(rpc_error);
-        let resp = framer.read_xml(channel).unwrap();
+        let channel = Cursor::new(rpc_error.into_bytes());
+        let mut framer = AsyncFramer::new(channel);
+        framer.upgrade().await;
+
+        let resp = framer.read_async().await.unwrap();
         let expected = r#"
 <?xml version="1.0" encoding="UTF-8"?>
 <rpc-reply message-id="8ddd59e5-96fc-4a55-a75f-a3fae2d9f712" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -232,9 +237,8 @@ mod tests {
         assert_eq!(resp, expected.trim());
     }
 
-    #[test]
-    fn test_eof_framer() {
-        let mut framer = Framer::new();
+    #[tokio::test]
+    async fn test_eof_framer() {
         let rpc_error = r#"
 <?xml version="1.0" encoding="UTF-8"?>
 <rpc-reply message-id="8ddd59e5-96fc-4a55-a75f-a3fae2d9f712" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -250,10 +254,10 @@ mod tests {
         </error-info>
     </rpc-error>
 </rpc-reply>
-]]>]]>"#
-            .to_string();
-        let channel = Cursor::new(rpc_error);
-        let resp = framer.read_xml(channel).unwrap();
+]]>]]>"#;
+        let channel = Cursor::new(rpc_error.trim().as_bytes().to_vec());
+        let mut framer = AsyncFramer::new(channel);
+        let resp = framer.read_async().await.unwrap();
         let expected = r#"
 <?xml version="1.0" encoding="UTF-8"?>
 <rpc-reply message-id="8ddd59e5-96fc-4a55-a75f-a3fae2d9f712" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
