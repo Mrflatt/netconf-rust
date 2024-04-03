@@ -1,0 +1,37 @@
+[package]
+name = "netconf-async"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lauri Huotari <flatlate@gmail.com>"]
+description = "A Rust NETCONF library"
+license = "Apache-2.0"
+repository = "https://github.com/networkguild/netconf-rust"
+categories = ["asynchronous", "network-programming"]
+keywords = ["network", "netconf", "async"]
+readme = "README.md"
+include = ["src/**/*", "../LICENSE", "README.md", "CHANGELOG.md"]
+
+[features]
+default = ["async-trait", "async-ssh2-lite", "tokio"]
+vendored-openssl = ["async-ssh2-lite/vendored-openssl"]
+openssl-on-win32 = ["async-ssh2-lite/openssl-on-win32"]
+
+[dependencies]
+anyhow = "1.0"
+async-ssh2-lite = { version = "0.4", features = ["tokio"], optional = true, default-features = false }
+async-trait = { version = "0.1", optional = true }
+log = { version = "0.4.21", features = ["std"] }
+memmem = "0.1"
+quick-xml = { version = "0.31", features = ["serialize", "overlapped-lists"] }
+serde = "1.0"
+serde-value = "0.7"
+serde_derive = "1.0"
+thiserror = "1"
+time = { version = "0.3", default-features = false, features = ["serde", "std", "formatting"] }
+tokio = { version = "1", features = ["io-std", "net", "rt-multi-thread", "signal", "sync"], default-features = false, optional = true }
+uuid = { version = "1.8", features = ["v4", "fast-rng"] }
+
+[dev-dependencies]
+async-std = "1.12"
+pretty_assertions = "1.4"
+tokio = { version = "1", features = ["macros"] }
