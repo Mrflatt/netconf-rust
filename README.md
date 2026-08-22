@@ -3,6 +3,8 @@
 Async [NETCONF](https://www.rfc-editor.org/rfc/rfc6241.html) client library and CLI, written in Rust.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Mrflatt/netconf-rust/ci.yaml?style=flat-square)](https://github.com/Mrflatt/netconf-rust/actions/workflows/ci.yaml)
+[![crates.io](https://img.shields.io/crates/v/netconf-async.svg?style=flat-square)](https://crates.io/crates/netconf-async)
+[![docs.rs](https://img.shields.io/docsrs/netconf-async?style=flat-square)](https://docs.rs/netconf-async)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
 Talk to routers and switches over SSH using the `netconf` subsystem. The library handles hello exchange, 1.0/1.1 framing, and typed RPCs. The CLI fans the same operations out to one or more hosts, honoring `~/.ssh/config`.
@@ -28,11 +30,11 @@ Rust edition **2024** (rustc 1.85+). Workspace resolver 3.
 
 ## Installation
 
-The crates are not published to crates.io yet. Use the git workspace:
+Library from [crates.io](https://crates.io/crates/netconf-async):
 
 ```toml
 [dependencies]
-netconf-async = { git = "https://github.com/Mrflatt/netconf-rust" }
+netconf-async = "0.1"
 ```
 
 CLI from source:

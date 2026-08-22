@@ -6,8 +6,7 @@ use memmem::{Searcher, TwoWaySearcher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Trait for NETCONF message framing
-/// See [RFC6242](https://tools.ietf.org/html/rfc6242#section-4.1)
+/// Async 1.0 / 1.1 message framer ([RFC6242 §4](https://www.rfc-editor.org/rfc/rfc6242.html#section-4)).
 pub struct AsyncFramer<T> {
     read_buffer: Vec<u8>,
     upgraded: AtomicBool,
@@ -16,6 +15,7 @@ pub struct AsyncFramer<T> {
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> AsyncFramer<T> {
+    /// Frame `channel` starting in 1.0 mode (`]]>]]>`).
     pub fn new(channel: T) -> Self {
         AsyncFramer {
             read_buffer: Vec::new(),
