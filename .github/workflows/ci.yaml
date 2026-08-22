@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Update rust
         run: rustup update stable && rustup default stable
       - name: Add rustfmt
@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Update rust
         run: rustup update stable && rustup default stable
       - name: Add clippy
@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Update rust
         run: rustup update stable && rustup default stable
       - name: Check netconf-async lockfile
@@ -93,7 +93,7 @@ jobs:
     name: Tests ${{ matrix.name }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Update stable rust
         run: rustup update --no-self-update stable
       - name: Update ${{ matrix.rust }} rust

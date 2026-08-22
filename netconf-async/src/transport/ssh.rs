@@ -1,8 +1,8 @@
 use crate::error::{NetconfClientError, NetconfClientResult};
-use crate::framer::async_framer::AsyncFramer;
 use crate::framer::Framer;
+use crate::framer::async_framer::AsyncFramer;
 use crate::transport::Transport;
-use async_ssh2_lite::{ssh2, AsyncChannel, AsyncSession, SessionConfiguration};
+use async_ssh2_lite::{AsyncChannel, AsyncSession, SessionConfiguration, ssh2};
 use async_trait::async_trait;
 use std::io;
 use tokio::net::TcpStream;
