@@ -14,6 +14,10 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
+/// libssh2 caps every blocking call with this, reads included, so it has to
+/// leave room for a slow device to answer a large `<get-config>`.
+const SSH_TIMEOUT_MS: u32 = 30_000;
+
 #[derive(Debug, Clone)]
 pub struct CliConfig {
     pub inner: Arc<Config>,
@@ -201,7 +205,7 @@ impl Host {
         stream: TcpStream,
     ) -> NetconfClientResult<AsyncSession<TcpStream>> {
         let mut configuration = SessionConfiguration::new();
-        configuration.set_timeout(10_000);
+        configuration.set_timeout(SSH_TIMEOUT_MS);
         if let Some(compress) = &self.params.compression {
             debug!(target: &self.address, "Setting compression: {}", compress);
             configuration.set_compress(*compress);
