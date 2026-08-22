@@ -28,7 +28,7 @@ pub struct Config {
     pub addresses: Vec<String>,
     pub strict_host_key: Option<HostKeyCheck>,
     pub timeout: Option<Duration>,
-    pub parallel: Option<usize>,
+    pub parallel: usize,
     pub stdin_xml: Option<String>,
     pub output: Output,
 }
@@ -46,7 +46,9 @@ impl CliConfig {
             .and_then(|value| parse_host_key_check(value));
         let timeout =
             value_of_if_exists::<u64>("timeout", &args).map(|&secs| Duration::from_secs(secs));
-        let parallel = value_of_if_exists::<u64>("parallel", &args).map(|&n| n as usize);
+        let parallel = value_of_if_exists::<u64>("parallel", &args)
+            .map(|&n| n as usize)
+            .unwrap_or_else(default_parallel);
         let stdin_xml = capture_stdin_xml(&args)?;
         let format = value_of_if_exists::<Format>("format", &args)
             .cloned()
@@ -70,6 +72,12 @@ impl CliConfig {
 }
 
 const SYSTEM_SSH_CONFIG: &str = "/etc/ssh/ssh_config";
+
+fn default_parallel() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4)
+}
 
 fn user_ssh_config_path() -> PathBuf {
     let mut path = home_dir().unwrap_or_else(|| PathBuf::from("/"));

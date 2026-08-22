@@ -46,7 +46,8 @@
 //! [`SshAuth`](transport::ssh::SshAuth) (password, agent, or key file) and an
 //! optional ProxyJump chain. Host-key policy defaults to
 //! [`RejectAll`](transport::ssh::HostKeyPolicy::RejectAll); pin a fingerprint
-//! or a `known_hosts` file. A custom byte pipe implements
+//! or a `known_hosts` file. Share a [`JumpPool`](transport::ssh::JumpPool)
+//! when many devices use the same hops. A custom byte pipe implements
 //! [`Transport`](transport::Transport).
 //!
 //! # Session flow

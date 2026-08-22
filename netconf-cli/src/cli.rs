@@ -8,7 +8,7 @@ use futures::stream::FuturesUnordered;
 use log::{debug, error, info};
 use netconf_async::connection::Connection;
 use netconf_async::error::{NetconfClientError, NetconfClientResult};
-use netconf_async::transport::ssh::SSHTransport;
+use netconf_async::transport::ssh::{JumpPool, SSHTransport, SshJump};
 use ssh2_config::{DefaultAlgorithms, HostParams};
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,11 +16,8 @@ use tokio::task::JoinHandle;
 
 pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
     let hosts = &cfg.inner.addresses;
-    let sem = cfg
-        .inner
-        .parallel
-        .map(|limit| Arc::new(tokio::sync::Semaphore::new(limit)));
-    let mut futures = FuturesUnordered::new();
+    let sem = Arc::new(tokio::sync::Semaphore::new(cfg.inner.parallel));
+    let mut prepared = Vec::new();
     for addr in hosts {
         let params = if let Some(ssh_config) = &cfg.inner.ssh_config {
             ssh_config.query(addr)
@@ -36,19 +33,45 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
             cfg.inner.ssh_config.clone(),
         )?
         .strict_host_key(cfg.inner.strict_host_key);
-        let addr = addr.clone();
+        let ssh_config = host.ssh_transport_config()?;
+        prepared.push((host, ssh_config, addr.clone()));
+    }
+    let mut pools = Vec::new();
+    let mut targets = Vec::new();
+    for (host, ssh_config, addr) in prepared {
+        let pool = shared_jump_pool(ssh_config.jumps(), &mut pools)?;
+        targets.push((host, ssh_config, addr, pool));
+    }
+    for (jumps, pool) in &pools {
+        let n = targets
+            .iter()
+            .filter(|(_, _, _, target_pool)| {
+                target_pool
+                    .as_ref()
+                    .is_some_and(|target| Arc::ptr_eq(target, pool))
+            })
+            .count();
+        if n > 1 {
+            info!(
+                "Sharing ProxyJump {} across {n} hosts",
+                format_jump_hops(jumps)
+            );
+        }
+    }
+    let mut futures = FuturesUnordered::new();
+    for (host, ssh_config, addr, pool) in targets {
         let start_time = Instant::now();
         let cmd_clone = cmd.clone();
         let cfg_clone = cfg.clone();
         let sem = sem.clone();
         let handle: JoinHandle<NetconfClientResult<()>> = tokio::spawn(async move {
-            let _permit = match sem {
-                Some(sem) => Some(sem.acquire_owned().await.map_err(|err| {
-                    NetconfClientError::new(format!("failed to acquire host slot: {err}"))
-                })?),
-                None => None,
+            let _permit = sem.acquire_owned().await.map_err(|err| {
+                NetconfClientError::new(format!("failed to acquire host slot: {err}"))
+            })?;
+            let ssh_transport = match pool {
+                Some(pool) => pool.connect_device(ssh_config).await?,
+                None => SSHTransport::connect(ssh_config).await?,
             };
-            let ssh_transport = SSHTransport::connect(host.ssh_transport_config()?).await?;
             let mut connection = Connection::new(ssh_transport).await?;
             if let Some(timeout) = cfg_clone.inner.timeout {
                 connection.set_timeout(Some(timeout));
@@ -154,7 +177,7 @@ See '<cyan,bold>netconf help</> <cyan><<command>></>' for more information on a 
                 .global(true),
             Arg::new("parallel")
                 .long("parallel")
-                .help("Max concurrent hosts (default: all)")
+                .help("Max concurrent hosts / jump channels (default: number of CPUs)")
                 .value_parser(clap::value_parser!(u64).range(1..))
                 .global(true),
             Arg::new("format")
@@ -184,6 +207,29 @@ fn global_opt(name: &'static str, help: &'static str) -> Arg {
     Arg::new(name).help(help).long(name).global(true)
 }
 
+fn format_jump_hops(jumps: &[SshJump]) -> String {
+    jumps
+        .iter()
+        .map(|jump| format!("{}:{}", jump.host(), jump.port()))
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
+fn shared_jump_pool(
+    jumps: &[SshJump],
+    pools: &mut Vec<(Vec<SshJump>, Arc<JumpPool>)>,
+) -> NetconfClientResult<Option<Arc<JumpPool>>> {
+    if jumps.is_empty() {
+        return Ok(None);
+    }
+    if let Some((_, pool)) = pools.iter().find(|(key, _)| key.as_slice() == jumps) {
+        return Ok(Some(pool.clone()));
+    }
+    let pool = Arc::new(JumpPool::new(jumps.to_vec())?);
+    pools.push((jumps.to_vec(), pool.clone()));
+    Ok(Some(pool))
+}
+
 #[test]
 fn verify_cli() {
     cli().debug_assert();
@@ -209,7 +255,19 @@ fn timeout_and_parallel_flags() {
     let (_, args) = matches.remove_subcommand().unwrap();
     let cfg = CliConfig::new(args).unwrap();
     assert_eq!(cfg.inner.timeout, Some(Duration::from_secs(15)));
-    assert_eq!(cfg.inner.parallel, Some(3));
+    assert_eq!(cfg.inner.parallel, 3);
+}
+
+#[test]
+fn parallel_defaults_to_cpu_count() {
+    use crate::config::CliConfig;
+
+    let mut matches = cli()
+        .try_get_matches_from(["netconf", "--host", "192.0.2.10", "get-config"])
+        .unwrap();
+    let (_, args) = matches.remove_subcommand().unwrap();
+    let cfg = CliConfig::new(args).unwrap();
+    assert!(cfg.inner.parallel >= 1, "{}", cfg.inner.parallel);
 }
 
 #[test]
@@ -243,4 +301,28 @@ fn format_and_output_dir_flags() {
         cfg.inner.output.dir_for_test().unwrap().as_os_str(),
         "/tmp/replies"
     );
+}
+
+#[test]
+fn shared_jump_pool_groups_identical_chains() {
+    use netconf_async::transport::ssh::SshAuth;
+
+    let jump = SshJump::new("jump", 22, "jump-user", SshAuth::Agent);
+    let other = SshJump::new("other", 22, "jump-user", SshAuth::Agent);
+    let mut pools = Vec::new();
+
+    assert!(shared_jump_pool(&[], &mut pools).unwrap().is_none());
+    let a = shared_jump_pool(std::slice::from_ref(&jump), &mut pools)
+        .unwrap()
+        .unwrap();
+    let b = shared_jump_pool(std::slice::from_ref(&jump), &mut pools)
+        .unwrap()
+        .unwrap();
+    let c = shared_jump_pool(std::slice::from_ref(&other), &mut pools)
+        .unwrap()
+        .unwrap();
+    assert!(Arc::ptr_eq(&a, &b));
+    assert!(!Arc::ptr_eq(&a, &c));
+    assert_eq!(pools.len(), 2);
+    assert_eq!(format_jump_hops(&[jump]), "jump:22");
 }

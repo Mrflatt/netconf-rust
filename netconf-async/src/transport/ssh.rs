@@ -345,38 +345,177 @@ impl SshConfig {
     }
 }
 
+/// Authenticated ProxyJump chain that can open many device sessions.
+///
+/// Clone and share across tasks. Dropping the last clone closes the jump
+/// SSH sessions. Device [`SSHTransport::close`] does not disconnect the jump.
+///
+/// Use [`JumpPool`] to share one chain across many devices.
+#[derive(Clone)]
+pub struct JumpSession {
+    last: Arc<tokio::sync::Mutex<Handle<ClientHandler>>>,
+    _upstream: Vec<Arc<tokio::sync::Mutex<Handle<ClientHandler>>>>,
+    hops: Vec<(String, u16)>,
+}
+
+impl fmt::Debug for JumpSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JumpSession")
+            .field("hops", &self.hops)
+            .finish()
+    }
+}
+
+impl fmt::Display for JumpSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&format_hops(
+            self.hops.iter().map(|(host, port)| (host.as_str(), *port)),
+        ))
+    }
+}
+
+impl JumpSession {
+    /// Handshake the full jump chain. `jumps` must not be empty.
+    pub async fn connect(jumps: &[SshJump]) -> NetconfClientResult<Self> {
+        let mut hops = jumps.iter();
+        let first = hops.next().ok_or_else(|| {
+            NetconfClientError::new("JumpSession::connect requires at least one hop")
+        })?;
+        debug!("Connecting via ProxyJump {}:{}", first.host, first.port);
+        let mut last = handshake_and_auth(
+            connect_tcp(&first.host, first.port).await?,
+            target_from_jump(first),
+        )
+        .await?;
+        let mut upstream = Vec::new();
+        for next in hops {
+            debug!("ProxyJump next hop {}:{}", next.host, next.port);
+            let stream = open_jump(&last, &next.host, next.port).await?;
+            upstream.push(Arc::new(tokio::sync::Mutex::new(last)));
+            last = handshake_and_auth(stream, target_from_jump(next)).await?;
+        }
+        Ok(Self {
+            last: Arc::new(tokio::sync::Mutex::new(last)),
+            _upstream: upstream,
+            hops: jumps
+                .iter()
+                .map(|jump| (jump.host.clone(), jump.port))
+                .collect(),
+        })
+    }
+
+    /// Open a NETCONF session to `config.host` through this jump chain.
+    ///
+    /// `config.jumps` are ignored; the path is this session.
+    pub async fn connect_device(&self, config: SshConfig) -> NetconfClientResult<SSHTransport> {
+        let stream = {
+            let handle = self.last.lock().await;
+            if handle.is_closed() {
+                return Err(NetconfClientError::new(format!(
+                    "jump session {self} is closed"
+                )));
+            }
+            open_jump(&handle, &config.host, config.port).await?
+        };
+        let session = handshake_and_auth(stream, target_from_config(&config)).await?;
+        let mut transport = open_netconf(session).await?;
+        transport._jumps = Some(self.clone());
+        Ok(transport)
+    }
+
+    /// True when the last hop can no longer open channels.
+    pub fn is_closed(&self) -> bool {
+        self.last
+            .try_lock()
+            .map(|handle| handle.is_closed())
+            .unwrap_or(false)
+    }
+}
+
+/// One shared [`JumpSession`] for a ProxyJump chain.
+///
+/// Handshake is lazy and serialized. Device channels open in parallel;
+/// cap concurrency at the caller (`--parallel` in the CLI).
+pub struct JumpPool {
+    hops: Vec<SshJump>,
+    session: tokio::sync::Mutex<Option<JumpSession>>,
+}
+
+impl fmt::Debug for JumpPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JumpPool")
+            .field("hops", &format_jump_hops(&self.hops))
+            .finish()
+    }
+}
+
+impl JumpPool {
+    /// Pool for this hop chain. Does not connect until the first device.
+    pub fn new(jumps: impl Into<Vec<SshJump>>) -> NetconfClientResult<Self> {
+        let hops = jumps.into();
+        if hops.is_empty() {
+            return Err(NetconfClientError::new(
+                "JumpPool::new requires at least one hop",
+            ));
+        }
+        Ok(Self {
+            hops,
+            session: tokio::sync::Mutex::new(None),
+        })
+    }
+
+    /// ProxyJump hops this pool authenticates, first hop first.
+    pub fn jumps(&self) -> &[SshJump] {
+        &self.hops
+    }
+
+    /// Open a NETCONF session to `config.host` through the shared jump session.
+    ///
+    /// `config.jumps` are ignored; the path is this pool.
+    pub async fn connect_device(&self, config: SshConfig) -> NetconfClientResult<SSHTransport> {
+        self.session().await?.connect_device(config).await
+    }
+
+    async fn session(&self) -> NetconfClientResult<JumpSession> {
+        let mut slot = self.session.lock().await;
+        if let Some(session) = slot.as_ref()
+            && !session.is_closed()
+        {
+            return Ok(session.clone());
+        }
+        // Hold the lock so a fan-out shares the first handshake.
+        let session = JumpSession::connect(&self.hops).await?;
+        *slot = Some(session.clone());
+        Ok(session)
+    }
+}
+
 /// NETCONF-over-SSH session on a russh channel.
 ///
 /// Default NETCONF port is **830**; pass it in [`SshConfig::new`].
 pub struct SSHTransport {
     session: Handle<ClientHandler>,
     framer: AsyncFramer<ChannelStream<client::Msg>>,
-    /// Keeps each ProxyJump session alive for the life of the device channel.
-    _jumps: Vec<Handle<ClientHandler>>,
+    /// Keeps the ProxyJump chain alive for the life of the device channel.
+    _jumps: Option<JumpSession>,
 }
 
 impl SSHTransport {
     /// TCP connect, authenticate, verify the host key, request subsystem `netconf`.
     ///
     /// Optional ProxyJump chain. Host-key policy defaults to
-    /// [`HostKeyPolicy::RejectAll`].
+    /// [`HostKeyPolicy::RejectAll`]. Share a [`JumpPool`] when many devices
+    /// use the same hops.
     pub async fn connect(config: SshConfig) -> NetconfClientResult<SSHTransport> {
-        let (session, jumps) = if config.jumps.is_empty() {
+        if config.jumps.is_empty() {
             let stream = connect_tcp(&config.host, config.port).await?;
-            (
-                handshake_and_auth(stream, target_from_config(&config)).await?,
-                Vec::new(),
-            )
-        } else {
-            connect_via_jumps(&config).await?
-        };
-        match open_netconf(session).await {
-            Ok(mut transport) => {
-                transport._jumps = jumps;
-                Ok(transport)
-            }
-            Err(err) => Err(err),
+            let session = handshake_and_auth(stream, target_from_config(&config)).await?;
+            return open_netconf(session).await;
         }
+        JumpSession::connect(&config.jumps)
+            .await?
+            .connect_device(config)
+            .await
     }
 }
 
@@ -402,7 +541,7 @@ impl Transport for SSHTransport {
             .disconnect(Disconnect::ByApplication, "Shutdown", "")
             .await
             .map_err(map_russh)?;
-        self._jumps.clear();
+        self._jumps = None;
         Ok(())
     }
 
@@ -490,55 +629,16 @@ async fn connect_tcp(host: &str, port: u16) -> NetconfClientResult<TcpStream> {
         .map_err(Into::into)
 }
 
-async fn connect_via_jumps(
-    config: &SshConfig,
-) -> NetconfClientResult<(Handle<ClientHandler>, Vec<Handle<ClientHandler>>)> {
-    let mut hops = config.jumps.iter();
-    let first = hops
-        .next()
-        .expect("connect_via_jumps requires at least one hop");
-    debug!("Connecting via ProxyJump {}:{}", first.host, first.port);
-    let mut session = handshake_and_auth(
-        connect_tcp(&first.host, first.port).await?,
-        target_from_jump(first),
-    )
-    .await?;
-
-    let mut handles = Vec::new();
-    for next in hops {
-        debug!("ProxyJump next hop {}:{}", next.host, next.port);
-        session = match open_jump(session, &next.host, next.port).await {
-            Ok((next_stream, prev)) => {
-                handles.push(prev);
-                match handshake_and_auth(next_stream, target_from_jump(next)).await {
-                    Ok(session) => session,
-                    Err(err) => return Err(err),
-                }
-            }
-            Err(err) => return Err(err),
-        };
-    }
-
-    match open_jump(session, &config.host, config.port).await {
-        Ok((stream, prev)) => {
-            handles.push(prev);
-            let session = handshake_and_auth(stream, target_from_config(config)).await?;
-            Ok((session, handles))
-        }
-        Err(err) => Err(err),
-    }
-}
-
 async fn open_jump(
-    jump_session: Handle<ClientHandler>,
+    jump_session: &Handle<ClientHandler>,
     host: &str,
     port: u16,
-) -> NetconfClientResult<(ChannelStream<client::Msg>, Handle<ClientHandler>)> {
+) -> NetconfClientResult<ChannelStream<client::Msg>> {
     let channel = jump_session
         .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 22)
         .await
         .map_err(map_russh)?;
-    Ok((channel.into_stream(), jump_session))
+    Ok(channel.into_stream())
 }
 
 async fn handshake_and_auth<R>(
@@ -577,7 +677,7 @@ async fn open_netconf(session: Handle<ClientHandler>) -> NetconfClientResult<SSH
     Ok(SSHTransport {
         session,
         framer: AsyncFramer::new(channel.into_stream()),
-        _jumps: Vec::new(),
+        _jumps: None,
     })
 }
 
@@ -1011,6 +1111,16 @@ async fn connect_agent() -> NetconfClientResult<DynAgent> {
     }
 }
 
+fn format_hops<'a>(hops: impl Iterator<Item = (&'a str, u16)>) -> String {
+    hops.map(|(host, port)| format!("{host}:{port}"))
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
+fn format_jump_hops(jumps: &[SshJump]) -> String {
+    format_hops(jumps.iter().map(|jump| (jump.host.as_str(), jump.port)))
+}
+
 fn map_connect(err: SshConnectError) -> NetconfClientError {
     match err {
         SshConnectError::Client(err) => err,
@@ -1280,5 +1390,26 @@ mod tests {
         assert_eq!(cfg.keepalive_interval, Some(Duration::from_secs(15)));
         assert_eq!(cfg.preferred.cipher[0], russh::cipher::AES_256_CTR);
         assert_eq!(cfg.preferred.compression[0], russh::compression::ZLIB);
+    }
+
+    #[test]
+    fn jump_pool_requires_a_hop() {
+        let err = JumpPool::new(Vec::<SshJump>::new()).unwrap_err();
+        assert!(err.to_string().contains("at least one hop"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn jump_session_requires_a_hop() {
+        let err = JumpSession::connect(&[]).await.unwrap_err();
+        assert!(err.to_string().contains("at least one hop"), "{err}");
+    }
+
+    #[test]
+    fn format_jump_hops_joins_chain() {
+        let hops = [
+            SshJump::new("jump1", 22, "u1", SshAuth::Agent),
+            SshJump::new("jump2", 2222, "u2", SshAuth::Agent),
+        ];
+        assert_eq!(format_jump_hops(&hops), "jump1:22 -> jump2:2222");
     }
 }
