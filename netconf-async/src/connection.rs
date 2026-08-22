@@ -1,9 +1,9 @@
+use crate::NETCONF_BASE_11_CAP;
 use crate::error::{NetconfClientError, NetconfClientResult};
 use crate::message::{
     Datastore, Filter, Hello, Rpc, RpcOperation, RpcReply, Source, WithDefaultsValue,
 };
 use crate::transport::Transport;
-use crate::NETCONF_BASE_11_CAP;
 use core::time::Duration;
 use log::{debug, error};
 use quick_xml::de::from_str;

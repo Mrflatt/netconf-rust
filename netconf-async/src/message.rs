@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use crate::{error, NETCONF_URN};
+use crate::{NETCONF_URN, error};
 use core::fmt;
 use core::fmt::Display;
 use core::ops::Add;
@@ -473,8 +473,8 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use quick_xml::de::from_str;
-    use time::format_description::well_known::Rfc3339;
     use time::Duration;
+    use time::format_description::well_known::Rfc3339;
 
     #[test]
     fn test_deserialize_rpc_reply() {
@@ -605,9 +605,7 @@ mod tests {
     <source>
       <running/>
     </source>
-    <with-defaults xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-with-defaults">
-      report-all
-    </with-defaults>
+    <with-defaults xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-with-defaults">report-all</with-defaults>
   </get-config>
 </rpc>
 "#;
@@ -628,9 +626,7 @@ mod tests {
         let expected = r#"
 <rpc message-id="c1be0e7f-3cbc-413f-8aa8-18ed663221d4" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
   <get>
-    <filter type="subtree">
-      <top xmlns="https://example.com/schema/1.2/config"><users><user><name>fred</name></user></users></top>
-    </filter>
+    <filter type="subtree"><top xmlns="https://example.com/schema/1.2/config"><users><user><name>fred</name></user></users></top></filter>
   </get>
 </rpc>
 "#;

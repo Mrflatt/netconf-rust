@@ -93,40 +93,28 @@ impl Host {
         password: &Option<String>,
         params: HostParams,
     ) -> NetconfClientResult<Host> {
-        let port: u16;
-        let address: String;
-        match addr.contains(':') {
-            true => {
-                let parts: Vec<&str> = addr.split(':').collect();
-                address = parts[0].to_string();
-                port = parts[1].parse().unwrap();
-            }
-            false => {
-                address = addr.to_string();
-                port = 830;
-            }
+        let (address, port) = match addr.split_once(':') {
+            Some((address, port)) => (address.to_string(), port.parse().unwrap()),
+            None => (addr.to_string(), 830),
         };
 
-        let auth_user: String;
-
-        if let Some(user) = username {
-            auth_user = user.clone();
+        let auth_user = if let Some(user) = username {
+            user.clone()
         } else if let Some(user) = params.user.as_deref() {
-            auth_user = user.to_string();
+            user.to_string()
         } else {
             return Err(NetconfClientError::new("No username provided".to_string()));
-        }
+        };
 
-        let auth_password: Option<String>;
-        if password.is_some() {
-            auth_password = password.clone();
+        let auth_password = if password.is_some() {
+            password.clone()
         } else if params.identity_file.is_none() {
             return Err(NetconfClientError::new(
                 "No password or identity file provided".to_string(),
             ));
         } else {
-            auth_password = None;
-        }
+            None
+        };
 
         Ok(Host {
             address,
@@ -146,9 +134,9 @@ impl Host {
             configuration.set_compress(*compress);
         }
         if self.params.tcp_keep_alive.unwrap_or(false)
-            && self.params.server_alive_interval.is_some()
+            && let Some(interval) = self.params.server_alive_interval
         {
-            let interval = self.params.server_alive_interval.unwrap().as_secs() as u32;
+            let interval = interval.as_secs() as u32;
             debug!(target: &self.address, "Setting keepalive interval: {} seconds", interval);
             configuration.set_keepalive(true, interval);
         }
@@ -202,27 +190,42 @@ async fn configure_session(
     session: &mut AsyncSession<TcpStream>,
     params: &HostParams,
 ) -> NetconfClientResult<()> {
-    if let Some(algos) = params.kex_algorithms.as_deref() {
+    if !params.kex_algorithms.is_default() {
         session
-            .method_pref(MethodType::Kex, algos.join(",").as_str())
+            .method_pref(
+                MethodType::Kex,
+                params.kex_algorithms.algorithms().join(",").as_str(),
+            )
             .await?;
     }
-    if let Some(algos) = params.host_key_algorithms.as_deref() {
+    if !params.host_key_algorithms.is_default() {
         session
-            .method_pref(MethodType::HostKey, algos.join(",").as_str())
+            .method_pref(
+                MethodType::HostKey,
+                params.host_key_algorithms.algorithms().join(",").as_str(),
+            )
             .await?;
     }
-    if let Some(algos) = params.ciphers.as_deref() {
+    if !params.ciphers.is_default() {
         session
-            .method_pref(MethodType::CryptCs, algos.join(",").as_str())
+            .method_pref(
+                MethodType::CryptCs,
+                params.ciphers.algorithms().join(",").as_str(),
+            )
             .await?;
     }
-    if let Some(algos) = params.mac.as_deref() {
+    if !params.mac.is_default() {
         session
-            .method_pref(MethodType::MacCs, algos.join(",").as_str())
+            .method_pref(
+                MethodType::MacCs,
+                params.mac.algorithms().join(",").as_str(),
+            )
             .await?;
         session
-            .method_pref(MethodType::MacSc, algos.join(",").as_str())
+            .method_pref(
+                MethodType::MacSc,
+                params.mac.algorithms().join(",").as_str(),
+            )
             .await?;
     }
     Ok(())
