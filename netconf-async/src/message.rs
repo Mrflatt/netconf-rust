@@ -392,7 +392,7 @@ enum ErrorType {
     Transport,
     Rpc,
     Protocol,
-    App,
+    Application,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -490,7 +490,7 @@ mod tests {
     </error-info>
   </rpc-error>
   <rpc-error>
-    <error-type>app</error-type>
+    <error-type>application</error-type>
     <error-tag>bad-element</error-tag>
     <error-severity>error</error-severity>
     <error-message>Element is not valid in the specified context.</error-message>
@@ -503,6 +503,22 @@ mod tests {
         let reply: RpcReply = from_str(reply).unwrap();
         assert!(reply.rpc_error.is_some(), "<rpc-error> element not found");
         assert_eq!(reply.rpc_error.unwrap().len(), 2);
+
+        let reply = r#"
+<rpc-reply message-id="1" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <rpc-error>
+    <error-type>application</error-type>
+    <error-tag>unknown-element</error-tag>
+    <error-severity>error</error-severity>
+    <error-message>Unknown element</error-message>
+    <error-info>
+      <bad-element>startup</bad-element>
+    </error-info>
+  </rpc-error>
+</rpc-reply>
+"#;
+        let reply: RpcReply = from_str(reply).unwrap();
+        assert!(reply.has_errors());
 
         let reply = r#"
 <rpc-reply message-id="c60e637d-0f79-41ea-ad09-a5ee02f08434">
