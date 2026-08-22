@@ -3,7 +3,8 @@
 use crate::error::NetconfClientResult;
 use async_trait::async_trait;
 
-#[cfg(feature = "async-ssh2-lite")]
+#[cfg(feature = "ssh")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ssh")))]
 pub mod ssh;
 
 /// Byte pipe that carries framed NETCONF messages.
