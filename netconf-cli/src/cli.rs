@@ -22,7 +22,14 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
         } else {
             HostParams::new(&DefaultAlgorithms::default())
         };
-        let host = Host::new(addr, &cfg.inner.username, &cfg.inner.password, params)?;
+        let host = Host::new(
+            addr,
+            &cfg.inner.username,
+            &cfg.inner.password,
+            params,
+            830,
+            cfg.inner.ssh_config.clone(),
+        )?;
         let start_time = Instant::now();
         let cmd_clone = cmd.clone();
         let cfg_clone = cfg.clone();
