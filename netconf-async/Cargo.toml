@@ -2,6 +2,7 @@
 name = "netconf-async"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["Lauri Huotari <65590793+Mrflatt@users.noreply.github.com>"]
 description = "Async NETCONF client (RFC 6241) over SSH"
 license = "MIT"
@@ -11,31 +12,34 @@ documentation = "https://docs.rs/netconf-async"
 categories = ["asynchronous", "network-programming"]
 keywords = ["netconf", "yang", "ssh", "async", "network"]
 readme = "README.md"
-include = ["src/**/*", "LICENSE", "README.md", "CHANGELOG.md"]
+include = ["src/**/*", "tests/**/*", "LICENSE", "README.md", "CHANGELOG.md"]
 
 [features]
-default = ["async-trait", "async-ssh2-lite", "tokio"]
-vendored-openssl = ["async-ssh2-lite/vendored-openssl"]
-openssl-on-win32 = ["async-ssh2-lite/openssl-on-win32"]
+default = ["ssh"]
+# NETCONF over SSH via `async-ssh2-lite`.
+ssh = ["dep:async-ssh2-lite", "tokio", "tokio/net"]
+# Tokio-backed framer, RPC timeouts, and notification streams.
+tokio = ["dep:tokio"]
+vendored-openssl = ["ssh", "async-ssh2-lite/vendored-openssl"]
+openssl-on-win32 = ["ssh", "async-ssh2-lite/openssl-on-win32"]
 
 [dependencies]
-anyhow = "1"
 async-ssh2-lite = { version = "0.5", features = ["tokio"], optional = true, default-features = false }
-async-trait = { version = "0.1", optional = true }
+async-trait = "0.1"
 log = { version = "0.4", features = ["std"] }
-memmem = "0.1"
+memchr = "2"
 quick-xml = { version = "0.41", features = ["serialize", "overlapped-lists"] }
-serde = "1"
-serde_derive = "1"
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 time = { version = "0.3", default-features = false, features = ["serde", "std", "formatting"] }
-tokio = { version = "1", features = ["io-std", "macros", "net", "rt-multi-thread", "signal", "sync"], default-features = false, optional = true }
+tokio = { version = "1", features = ["io-util", "sync", "time"], default-features = false, optional = true }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
+async-trait = "0.1"
 pretty_assertions = "1"
-tokio = { version = "1", features = ["macros"] }
+tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }
 
 [package.metadata.docs.rs]
-all-features = false
+features = ["ssh"]
 rustdoc-args = ["--cfg", "docsrs", "--generate-link-to-definition"]

@@ -3,7 +3,9 @@
 use crate::error::NetconfClientResult;
 use async_trait::async_trait;
 
+/// Tokio-backed [`Framer`] implementation.
 #[cfg(feature = "tokio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub mod async_framer;
 
 /// 1.0 message terminator (`]]>]]>`).

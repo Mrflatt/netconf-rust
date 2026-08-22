@@ -6,7 +6,6 @@ use crate::framer::async_framer::AsyncFramer;
 use crate::transport::Transport;
 use async_ssh2_lite::{AsyncChannel, AsyncSession, SessionConfiguration, ssh2};
 use async_trait::async_trait;
-use std::io;
 use tokio::net::TcpStream;
 
 /// NETCONF-over-SSH session on a Tokio [`TcpStream`].
@@ -21,7 +20,9 @@ impl SSHTransport {
     /// Wrap an already-authenticated [`AsyncSession`] and request subsystem `netconf`.
     ///
     /// Use this for ssh-agent or public-key auth; build and authenticate the
-    /// session yourself, then hand it over.
+    /// session yourself, then hand it over. Set any timeout on the session
+    /// before calling, and bound individual RPCs with
+    /// [`Connection::set_timeout`](crate::connection::Connection::set_timeout).
     pub async fn new_with_session(
         session: AsyncSession<TcpStream>,
     ) -> NetconfClientResult<SSHTransport> {
@@ -62,7 +63,7 @@ impl Transport for SSHTransport {
     }
 
     async fn close(&mut self) -> NetconfClientResult<()> {
-        let mut channel = self.session.channel_session().await?;
+        let channel = self.framer.channel_mut();
         channel.send_eof().await?;
         channel.wait_eof().await?;
         channel.close().await?;
@@ -88,6 +89,8 @@ async fn connect_internal(session: AsyncSession<TcpStream>) -> NetconfClientResu
         };
         Ok(transport)
     } else {
-        Err(NetconfClientError::Io(io::Error::last_os_error()))
+        Err(NetconfClientError::new(
+            "SSH session is not authenticated; authenticate before requesting the netconf subsystem",
+        ))
     }
 }

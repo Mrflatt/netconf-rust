@@ -36,8 +36,9 @@
 //!
 //! [`Connection::new`](connection::Connection::new) performs the `<hello>`
 //! exchange and upgrades the framer when the server advertises
-//! [`NETCONF_BASE_11_CAP`]. Skipping [`close_session`](connection::Connection::close_session)
-//! still closes on [`Drop`] (tokio feature).
+//! [`NETCONF_BASE_11_CAP`]. A clean shutdown needs to await I/O, so
+//! [`close_session`](connection::Connection::close_session) is not something
+//! [`Drop`] can do for you; dropping an open session only logs a warning.
 //!
 //! Password auth is the short path. For ssh-agent or key files, build an
 //! authenticated `async_ssh2_lite::AsyncSession` and wrap it with
@@ -53,14 +54,17 @@
 //! 4. Each RPC is written and the reply parsed as
 //!    [`RpcReply`](message::RpcReply); any `<rpc-error>` becomes
 //!    [`NetconfClientError::Netconf`](error::NetconfClientError::Netconf).
-//! 5. [`close_session`](connection::Connection::close_session) marks the
-//!    session closed so `Drop` does not send another `<close-session>`.
+//! 5. [`close_session`](connection::Connection::close_session) ends the session
+//!    and tears the transport down.
 //!
 //! Default NETCONF-over-SSH port is **830**.
 //!
 //! Notifications use `<create-subscription>`
 //! ([RFC 5277](https://www.rfc-editor.org/rfc/rfc5277.html)).
 //! `with-defaults` follows [RFC 6243](https://www.rfc-editor.org/rfc/rfc6243.html).
+
+#![warn(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod connection;
 pub mod error;

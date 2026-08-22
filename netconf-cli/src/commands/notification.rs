@@ -3,7 +3,7 @@ use crate::config::Config;
 use clap::{Command, ValueHint, arg};
 use log::{error, info};
 use netconf_async::connection::Connection;
-use netconf_async::error::NetconfClientResult;
+use netconf_async::error::{NetconfClientError, NetconfClientResult};
 use netconf_async::message::Filter;
 use tokio::sync::mpsc::channel;
 
@@ -66,6 +66,15 @@ pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()
                 info!("Notification:\n{}", msg);
             }
         });
-        conn.notification(tx, Some(stream), filter, None).await
+        // The library streams until the device stops or the future is dropped,
+        // so Ctrl-C is handled here rather than inside the session.
+        tokio::select! {
+            result = conn.notification(tx, Some(stream), filter, None) => result,
+            signal = tokio::signal::ctrl_c() => {
+                signal.map_err(NetconfClientError::Io)?;
+                info!("Stopping notification listener");
+                Ok(())
+            }
+        }
     }
 }
