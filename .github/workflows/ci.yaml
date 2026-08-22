@@ -2,7 +2,7 @@ name: CI
 on:
   push:
     branches:
-      - master
+      - main
   pull_request:
     types:
       - opened
@@ -64,9 +64,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 1
       CARGO_INCREMENTAL: 0
       CARGO_PUBLIC_NETWORK_TESTS: 1
-      # Workaround for https://github.com/rust-lang/rustup/issues/3036
-      RUSTUP_WINDOWS_PATH_ADD_BIN: 0
     strategy:
+      fail-fast: false
       matrix:
         include:
           - name: Linux x86_64 stable
@@ -105,5 +104,7 @@ jobs:
       - name: Add rustfmt
         if: matrix.os == 'ubuntu-latest'
         run: rustup component add rustfmt || echo "rustfmt not available"
+      # Windows libssh2 uses WinCNG. vendored-openssl needs Strawberry Perl;
+      # Git's MSYS perl is on PATH in bash and breaks OpenSSL Configure.
       - name: Run tests
         run: cargo test
