@@ -4,20 +4,25 @@ use crate::error::{NetconfClientError, NetconfClientResult};
 use crate::framer::Framer;
 use crate::framer::async_framer::AsyncFramer;
 use crate::transport::Transport;
-use async_ssh2_lite::{AsyncChannel, AsyncSession, SessionConfiguration, ssh2};
 use async_trait::async_trait;
 use core::fmt;
 use core::time::Duration;
 use log::{debug, warn};
+use russh::client::{self, Handle};
+use russh::keys::agent::AgentIdentity;
+use russh::keys::agent::client::AgentClient;
+use russh::keys::{
+    self, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, known_hosts,
+};
+use russh::{ChannelStream, Disconnect, Preferred};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::task::JoinHandle;
+use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::time::timeout;
 use zeroize::Zeroizing;
 
-/// libssh2 caps every blocking call with this, reads included, so it has to
-/// leave room for a slow device to answer a large `<get-config>`.
-const SSH_TIMEOUT_MS: u32 = 30_000;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How to authenticate the SSH user.
@@ -84,7 +89,7 @@ pub enum HostKeyPolicy {
     /// or without base64 padding. Obtain it with
     /// `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`.
     Fingerprint(String),
-    /// Look the host up in an OpenSSH `known_hosts` file via libssh2.
+    /// Look the host up in an OpenSSH `known_hosts` file.
     ///
     /// Missing file, missing host, and key mismatch all fail closed.
     KnownHosts(PathBuf),
@@ -95,7 +100,7 @@ pub enum HostKeyPolicy {
     AcceptAll,
 }
 
-/// libssh2 session knobs applied before the handshake.
+/// SSH session knobs applied before the handshake.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SshSessionOpts {
     compression: Option<bool>,
@@ -107,7 +112,7 @@ pub struct SshSessionOpts {
 }
 
 impl SshSessionOpts {
-    /// Empty opts: libssh2 defaults, no compression, no keepalive.
+    /// Empty opts: library defaults, no compression preference, no keepalive.
     pub fn new() -> Self {
         Self::default()
     }
@@ -340,14 +345,14 @@ impl SshConfig {
     }
 }
 
-/// NETCONF-over-SSH session on a Tokio [`TcpStream`].
+/// NETCONF-over-SSH session on a russh channel.
 ///
 /// Default NETCONF port is **830**; pass it in [`SshConfig::new`].
 pub struct SSHTransport {
-    session: AsyncSession<TcpStream>,
-    framer: AsyncFramer<AsyncChannel<TcpStream>>,
-    /// Keeps each ProxyJump copy task (and thus each jump session) alive.
-    _jumps: Vec<JoinHandle<()>>,
+    session: Handle<ClientHandler>,
+    framer: AsyncFramer<ChannelStream<client::Msg>>,
+    /// Keeps each ProxyJump session alive for the life of the device channel.
+    _jumps: Vec<Handle<ClientHandler>>,
 }
 
 impl SSHTransport {
@@ -356,23 +361,21 @@ impl SSHTransport {
     /// Optional ProxyJump chain. Host-key policy defaults to
     /// [`HostKeyPolicy::RejectAll`].
     pub async fn connect(config: SshConfig) -> NetconfClientResult<SSHTransport> {
-        let (stream, jumps) = if config.jumps.is_empty() {
-            (connect_tcp(&config.host, config.port).await?, Vec::new())
+        let (session, jumps) = if config.jumps.is_empty() {
+            let stream = connect_tcp(&config.host, config.port).await?;
+            (
+                handshake_and_auth(stream, target_from_config(&config)).await?,
+                Vec::new(),
+            )
         } else {
-            connect_via_jumps(&config.host, config.port, &config.jumps).await?
+            connect_via_jumps(&config).await?
         };
-        match handshake_and_auth(stream, target_from_config(&config)).await {
-            Ok(session) => {
-                let mut transport = connect_internal(session).await?;
+        match open_netconf(session).await {
+            Ok(mut transport) => {
                 transport._jumps = jumps;
                 Ok(transport)
             }
-            Err(err) => {
-                for handle in jumps {
-                    handle.abort();
-                }
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
 }
@@ -392,18 +395,14 @@ impl Transport for SSHTransport {
     }
 
     async fn close(&mut self) -> NetconfClientResult<()> {
-        let channel = self.framer.channel_mut();
-        channel.send_eof().await.ssh()?;
-        channel.wait_eof().await.ssh()?;
-        channel.close().await.ssh()?;
-        channel.wait_close().await.ssh()?;
-        self.session
-            .disconnect(Some(ssh2::ByApplication), "Shutdown", None)
-            .await
-            .ssh()?;
-        for handle in self._jumps.drain(..) {
-            handle.abort();
+        if let Err(err) = self.framer.channel_mut().shutdown().await {
+            debug!("SSH channel shutdown: {err}");
         }
+        self.session
+            .disconnect(Disconnect::ByApplication, "Shutdown", "")
+            .await
+            .map_err(map_russh)?;
+        self._jumps.clear();
         Ok(())
     }
 
@@ -443,19 +442,44 @@ fn target_from_jump(jump: &SshJump) -> Target<'_> {
     }
 }
 
-async fn connect_internal(session: AsyncSession<TcpStream>) -> NetconfClientResult<SSHTransport> {
-    if session.authenticated() {
-        let mut channel = session.channel_session().await.ssh()?;
-        channel.subsystem("netconf").await.ssh()?;
-        Ok(SSHTransport {
-            session,
-            framer: AsyncFramer::new(channel),
-            _jumps: Vec::new(),
-        })
-    } else {
-        Err(NetconfClientError::new(
-            "SSH session is not authenticated; authenticate before requesting the netconf subsystem",
-        ))
+struct ClientHandler {
+    host: String,
+    port: u16,
+    policy: HostKeyPolicy,
+}
+
+#[derive(Debug)]
+enum SshConnectError {
+    Client(NetconfClientError),
+    Protocol(russh::Error),
+}
+
+impl From<russh::Error> for SshConnectError {
+    fn from(err: russh::Error) -> Self {
+        Self::Protocol(err)
+    }
+}
+
+impl From<NetconfClientError> for SshConnectError {
+    fn from(err: NetconfClientError) -> Self {
+        Self::Client(err)
+    }
+}
+
+impl client::Handler for ClientHandler {
+    type Error = SshConnectError;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        verify_host_key(
+            &self.host,
+            self.port,
+            &self.policy,
+            &server_public_key.public_key(),
+        )?;
+        Ok(true)
     }
 }
 
@@ -467,11 +491,9 @@ async fn connect_tcp(host: &str, port: u16) -> NetconfClientResult<TcpStream> {
 }
 
 async fn connect_via_jumps(
-    host: &str,
-    port: u16,
-    jumps: &[SshJump],
-) -> NetconfClientResult<(TcpStream, Vec<JoinHandle<()>>)> {
-    let mut hops = jumps.iter();
+    config: &SshConfig,
+) -> NetconfClientResult<(Handle<ClientHandler>, Vec<Handle<ClientHandler>>)> {
+    let mut hops = config.jumps.iter();
     let first = hops
         .next()
         .expect("connect_via_jumps requires at least one hop");
@@ -485,159 +507,225 @@ async fn connect_via_jumps(
     let mut handles = Vec::new();
     for next in hops {
         debug!("ProxyJump next hop {}:{}", next.host, next.port);
-        match open_tunnel(session, &next.host, next.port).await {
-            Ok((stream, handle)) => {
-                handles.push(handle);
-                session = match handshake_and_auth(stream, target_from_jump(next)).await {
+        session = match open_jump(session, &next.host, next.port).await {
+            Ok((next_stream, prev)) => {
+                handles.push(prev);
+                match handshake_and_auth(next_stream, target_from_jump(next)).await {
                     Ok(session) => session,
-                    Err(err) => {
-                        abort_jumps(handles);
-                        return Err(err);
-                    }
-                };
-            }
-            Err(err) => {
-                abort_jumps(handles);
-                return Err(err);
-            }
-        }
-    }
-
-    match open_tunnel(session, host, port).await {
-        Ok((stream, handle)) => {
-            handles.push(handle);
-            Ok((stream, handles))
-        }
-        Err(err) => {
-            abort_jumps(handles);
-            Err(err)
-        }
-    }
-}
-
-fn abort_jumps(handles: Vec<JoinHandle<()>>) {
-    for handle in handles {
-        handle.abort();
-    }
-}
-
-/// Expose a `direct-tcpip` channel as a local loopback socket.
-///
-/// `AsyncSession` needs a raw fd, so the tunneled channel is not wrapped
-/// as a stream. Bind stays on 127.0.0.1.
-async fn open_tunnel(
-    jump_session: AsyncSession<TcpStream>,
-    host: &str,
-    port: u16,
-) -> NetconfClientResult<(TcpStream, JoinHandle<()>)> {
-    let channel = jump_session
-        .channel_direct_tcpip(host, port, Some(("127.0.0.1", 22)))
-        .await
-        .ssh()?;
-
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let local_addr = listener.local_addr()?;
-    let handle = tokio::spawn(async move {
-        let _keep_jump = jump_session;
-        match listener.accept().await {
-            Ok((mut sock, _)) => {
-                let mut channel = channel;
-                if let Err(err) = tokio::io::copy_bidirectional(&mut channel, &mut sock).await {
-                    debug!("ProxyJump tunnel closed: {err}");
+                    Err(err) => return Err(err),
                 }
             }
-            Err(err) => debug!("ProxyJump local accept failed: {err}"),
-        }
-    });
+            Err(err) => return Err(err),
+        };
+    }
 
-    let stream = timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(local_addr))
-        .await
-        .map_err(|_| NetconfClientError::new("timeout connecting through ProxyJump"))?
-        .map_err(NetconfClientError::from)?;
-    Ok((stream, handle))
+    match open_jump(session, &config.host, config.port).await {
+        Ok((stream, prev)) => {
+            handles.push(prev);
+            let session = handshake_and_auth(stream, target_from_config(config)).await?;
+            Ok((session, handles))
+        }
+        Err(err) => Err(err),
+    }
 }
 
-async fn handshake_and_auth(
-    stream: TcpStream,
+async fn open_jump(
+    jump_session: Handle<ClientHandler>,
+    host: &str,
+    port: u16,
+) -> NetconfClientResult<(ChannelStream<client::Msg>, Handle<ClientHandler>)> {
+    let channel = jump_session
+        .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 22)
+        .await
+        .map_err(map_russh)?;
+    Ok((channel.into_stream(), jump_session))
+}
+
+async fn handshake_and_auth<R>(
+    stream: R,
     target: Target<'_>,
-) -> NetconfClientResult<AsyncSession<TcpStream>> {
-    let mut configuration = SessionConfiguration::new();
-    configuration.set_timeout(SSH_TIMEOUT_MS);
-    apply_session_configuration(&mut configuration, target.session);
-    let mut session = AsyncSession::new(stream, configuration).ssh()?;
-    apply_method_prefs(&session, target.session).await?;
-    session.handshake().await.ssh()?;
-    verify_host_key(&session, target.host, target.port, target.host_key)?;
-    authenticate(&session, target.username, target.auth).await?;
-    if !session.authenticated() {
-        return Err(NetconfClientError::new(format!(
-            "SSH authentication failed for {}@{}:{}",
-            target.username, target.host, target.port
-        )));
-    }
+) -> NetconfClientResult<Handle<ClientHandler>>
+where
+    R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let ssh_config = build_client_config(target.session)?;
+    let handler = ClientHandler {
+        host: target.host.to_string(),
+        port: target.port,
+        policy: target.host_key.clone(),
+    };
+    let mut session = client::connect_stream(Arc::new(ssh_config), stream, handler)
+        .await
+        .map_err(map_connect)?;
+    authenticate(
+        &mut session,
+        target.host,
+        target.port,
+        target.username,
+        target.auth,
+    )
+    .await?;
     Ok(session)
 }
 
-fn apply_session_configuration(configuration: &mut SessionConfiguration, opts: &SshSessionOpts) {
-    if let Some(compress) = opts.compression {
-        configuration.set_compress(compress);
-    }
-    if let Some(interval) = opts.keepalive {
-        configuration.set_keepalive(true, interval.as_secs() as u32);
-    }
+async fn open_netconf(session: Handle<ClientHandler>) -> NetconfClientResult<SSHTransport> {
+    let channel = session.channel_open_session().await.map_err(map_russh)?;
+    channel
+        .request_subsystem(true, "netconf")
+        .await
+        .map_err(map_russh)?;
+    Ok(SSHTransport {
+        session,
+        framer: AsyncFramer::new(channel.into_stream()),
+        _jumps: Vec::new(),
+    })
 }
 
-async fn apply_method_prefs(
-    session: &AsyncSession<TcpStream>,
-    opts: &SshSessionOpts,
-) -> NetconfClientResult<()> {
+fn build_client_config(opts: &SshSessionOpts) -> NetconfClientResult<client::Config> {
+    let mut preferred = Preferred::DEFAULT;
+    if let Some(enabled) = opts.compression {
+        preferred.compression = if enabled {
+            Cow::Owned(vec![
+                russh::compression::ZLIB,
+                russh::compression::ZLIB_LEGACY,
+                russh::compression::NONE,
+            ])
+        } else {
+            Cow::Owned(vec![russh::compression::NONE])
+        };
+    }
     if let Some(kex) = opts.kex.as_deref() {
-        session
-            .method_pref(ssh2::MethodType::Kex, kex)
-            .await
-            .ssh()?;
+        preferred.kex = Cow::Owned(parse_kex(kex)?);
     }
     if let Some(host_key) = opts.host_key_algs.as_deref() {
-        session
-            .method_pref(ssh2::MethodType::HostKey, host_key)
-            .await
-            .ssh()?;
+        preferred.key = Cow::Owned(parse_host_keys(host_key)?);
     }
     if let Some(ciphers) = opts.ciphers.as_deref() {
-        session
-            .method_pref(ssh2::MethodType::CryptCs, ciphers)
-            .await
-            .ssh()?;
+        preferred.cipher = Cow::Owned(parse_ciphers(ciphers)?);
     }
     if let Some(macs) = opts.macs.as_deref() {
-        session
-            .method_pref(ssh2::MethodType::MacCs, macs)
-            .await
-            .ssh()?;
-        session
-            .method_pref(ssh2::MethodType::MacSc, macs)
-            .await
-            .ssh()?;
+        preferred.mac = Cow::Owned(parse_macs(macs)?);
     }
-    Ok(())
+    Ok(client::Config {
+        preferred,
+        keepalive_interval: opts.keepalive,
+        inactivity_timeout: None,
+        nodelay: true,
+        ..client::Config::default()
+    })
+}
+
+fn split_prefs(prefs: &str) -> impl Iterator<Item = &str> {
+    prefs
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
+fn parse_kex(prefs: &str) -> NetconfClientResult<Vec<russh::kex::Name>> {
+    let mut out = Vec::new();
+    for name in split_prefs(prefs) {
+        match russh::kex::Name::try_from(name) {
+            Ok(alg) => {
+                if !out.contains(&alg) {
+                    out.push(alg);
+                }
+            }
+            Err(()) => warn!("ignoring unknown SSH kex algorithm {name}"),
+        }
+    }
+    if out.is_empty() {
+        return Err(NetconfClientError::new(format!(
+            "no supported SSH kex algorithms in '{prefs}'"
+        )));
+    }
+    for ext in [
+        russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+        russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+    ] {
+        if !out.contains(&ext) {
+            out.push(ext);
+        }
+    }
+    Ok(out)
+}
+
+fn parse_host_keys(prefs: &str) -> NetconfClientResult<Vec<keys::Algorithm>> {
+    let mut out = Vec::new();
+    for name in split_prefs(prefs) {
+        match keys::Algorithm::new(name) {
+            Ok(alg) => {
+                if !out.contains(&alg) {
+                    out.push(alg);
+                }
+            }
+            Err(err) => warn!("ignoring unknown SSH host-key algorithm {name}: {err}"),
+        }
+    }
+    if out.is_empty() {
+        return Err(NetconfClientError::new(format!(
+            "no supported SSH host-key algorithms in '{prefs}'"
+        )));
+    }
+    Ok(out)
+}
+
+fn parse_ciphers(prefs: &str) -> NetconfClientResult<Vec<russh::cipher::Name>> {
+    let mut out = Vec::new();
+    for name in split_prefs(prefs) {
+        match russh::cipher::Name::try_from(name) {
+            Ok(alg) => {
+                if !out.contains(&alg) {
+                    out.push(alg);
+                }
+            }
+            Err(()) => warn!("ignoring unknown SSH cipher {name}"),
+        }
+    }
+    if out.is_empty() {
+        return Err(NetconfClientError::new(format!(
+            "no supported SSH ciphers in '{prefs}'"
+        )));
+    }
+    Ok(out)
+}
+
+fn parse_macs(prefs: &str) -> NetconfClientResult<Vec<russh::mac::Name>> {
+    let mut out = Vec::new();
+    for name in split_prefs(prefs) {
+        match russh::mac::Name::try_from(name) {
+            Ok(alg) => {
+                if !out.contains(&alg) {
+                    out.push(alg);
+                }
+            }
+            Err(()) => warn!("ignoring unknown SSH MAC algorithm {name}"),
+        }
+    }
+    if out.is_empty() {
+        return Err(NetconfClientError::new(format!(
+            "no supported SSH MAC algorithms in '{prefs}'"
+        )));
+    }
+    Ok(out)
 }
 
 fn verify_host_key(
-    session: &AsyncSession<TcpStream>,
     host: &str,
     port: u16,
     policy: &HostKeyPolicy,
+    key: &PublicKey,
 ) -> NetconfClientResult<()> {
     match policy {
         HostKeyPolicy::KnownHosts(path) => {
-            return check_known_hosts(session, host, port, path, false);
+            return check_known_hosts(host, port, path, key, false);
         }
         HostKeyPolicy::AcceptNew(path) => {
-            return check_known_hosts(session, host, port, path, true);
+            return check_known_hosts(host, port, path, key, true);
         }
         _ => {}
     }
-    let fingerprint = host_key_fingerprint(session)?;
+    let fingerprint = host_key_fingerprint(key);
     if evaluate_host_key_policy(policy, &fingerprint) {
         if matches!(policy, HostKeyPolicy::AcceptAll) {
             warn!(
@@ -663,37 +751,25 @@ fn verify_host_key(
 }
 
 fn check_known_hosts(
-    session: &AsyncSession<TcpStream>,
     host: &str,
     port: u16,
     path: &Path,
+    key: &PublicKey,
     accept_new: bool,
 ) -> NetconfClientResult<()> {
-    let fingerprint = host_key_fingerprint(session)?;
-    let (key, key_type) = session
-        .host_key()
-        .ok_or_else(|| NetconfClientError::new("server did not provide a host key"))?;
-    let mut known = session.known_hosts().ssh()?;
-    if path.exists() {
-        known
-            .read_file(path, ssh2::KnownHostFileKind::OpenSSH)
-            .map_err(|err| {
-                NetconfClientError::new(format!(
-                    "failed to read known_hosts {}: {err}",
-                    path.display()
-                ))
-            })?;
-    } else if !accept_new {
+    let fingerprint = host_key_fingerprint(key);
+    if !path.exists() && !accept_new {
         return Err(NetconfClientError::new(format!(
             "failed to read known_hosts {}: file not found",
             path.display()
         )));
     }
-    match known_hosts_action(known.check_port(host, port, key), accept_new) {
+    match known_hosts_action(
+        keys::check_known_hosts_path(host, port, key, path),
+        accept_new,
+    ) {
         KnownHostsAction::Allow => Ok(()),
-        KnownHostsAction::Pin => {
-            pin_new_host(&mut known, path, host, port, key, key_type, &fingerprint)
-        }
+        KnownHostsAction::Pin => pin_new_host(path, host, port, key, &fingerprint),
         KnownHostsAction::Reject(reason) => Err(NetconfClientError::HostKeyRejected {
             host: host.to_string(),
             fingerprint,
@@ -709,43 +785,48 @@ enum KnownHostsAction {
     Reject(&'static str),
 }
 
-fn known_hosts_action(result: ssh2::CheckResult, accept_new: bool) -> KnownHostsAction {
+#[derive(Debug)]
+enum KnownHostsCheck {
+    Match,
+    NotFound,
+    Mismatch,
+    Failure,
+}
+
+fn known_hosts_action(result: Result<bool, keys::Error>, accept_new: bool) -> KnownHostsAction {
+    known_hosts_action_from(classify_known_hosts(result), accept_new)
+}
+
+fn classify_known_hosts(result: Result<bool, keys::Error>) -> KnownHostsCheck {
     match result {
-        ssh2::CheckResult::Match => KnownHostsAction::Allow,
-        ssh2::CheckResult::NotFound if accept_new => KnownHostsAction::Pin,
+        Ok(true) => KnownHostsCheck::Match,
+        Ok(false) => KnownHostsCheck::NotFound,
+        Err(keys::Error::KeyChanged { .. }) => KnownHostsCheck::Mismatch,
+        Err(_) => KnownHostsCheck::Failure,
+    }
+}
+
+fn known_hosts_action_from(check: KnownHostsCheck, accept_new: bool) -> KnownHostsAction {
+    match check {
+        KnownHostsCheck::Match => KnownHostsAction::Allow,
+        KnownHostsCheck::NotFound if accept_new => KnownHostsAction::Pin,
         other => KnownHostsAction::Reject(known_hosts_reason(other)),
     }
 }
 
 fn pin_new_host(
-    known: &mut ssh2::KnownHosts,
     path: &Path,
     host: &str,
     port: u16,
-    key: &[u8],
-    key_type: ssh2::HostKeyType,
+    key: &PublicKey,
     fingerprint: &str,
 ) -> NetconfClientResult<()> {
-    let spec = known_hosts_host_spec(host, port);
-    known
-        .add(&spec, key, host, key_type.into())
-        .map_err(|err| {
-            NetconfClientError::new(format!(
-                "failed to record host key for {host} in {}: {err}",
-                path.display()
-            ))
-        })?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    known
-        .write_file(path, ssh2::KnownHostFileKind::OpenSSH)
-        .map_err(|err| {
-            NetconfClientError::new(format!(
-                "failed to write known_hosts {}: {err}",
-                path.display()
-            ))
-        })?;
+    known_hosts::learn_known_hosts_path(host, port, key, path).map_err(|err| {
+        NetconfClientError::new(format!(
+            "failed to record host key for {host} in {}: {err}",
+            path.display()
+        ))
+    })?;
     warn!(
         "accepted new SSH host key for {host} ({fingerprint}); stored in {}",
         path.display()
@@ -753,6 +834,7 @@ fn pin_new_host(
     Ok(())
 }
 
+#[cfg(test)]
 fn known_hosts_host_spec(host: &str, port: u16) -> String {
     if port == 22 {
         host.to_string()
@@ -761,20 +843,17 @@ fn known_hosts_host_spec(host: &str, port: u16) -> String {
     }
 }
 
-fn known_hosts_reason(result: ssh2::CheckResult) -> &'static str {
-    match result {
-        ssh2::CheckResult::Match => "matched",
-        ssh2::CheckResult::Mismatch => "key does not match known_hosts",
-        ssh2::CheckResult::NotFound => "host not in known_hosts",
-        ssh2::CheckResult::Failure => "known_hosts check failed",
+fn known_hosts_reason(check: KnownHostsCheck) -> &'static str {
+    match check {
+        KnownHostsCheck::Match => "matched",
+        KnownHostsCheck::Mismatch => "key does not match known_hosts",
+        KnownHostsCheck::NotFound => "host not in known_hosts",
+        KnownHostsCheck::Failure => "known_hosts check failed",
     }
 }
 
-fn host_key_fingerprint(session: &AsyncSession<TcpStream>) -> NetconfClientResult<String> {
-    let hash = session
-        .host_key_hash(ssh2::HashType::Sha256)
-        .ok_or_else(|| NetconfClientError::new("server did not provide a host key"))?;
-    Ok(format!("SHA256:{}", base64_nopad(hash)))
+fn host_key_fingerprint(key: &PublicKey) -> String {
+    format!("{}", key.fingerprint(HashAlg::Sha256))
 }
 
 /// Decide whether `actual_fingerprint` (`SHA256:…`) is accepted under `policy`.
@@ -805,98 +884,158 @@ fn normalize_fingerprint(value: &str) -> String {
 }
 
 async fn authenticate(
-    session: &AsyncSession<TcpStream>,
+    session: &mut Handle<ClientHandler>,
+    host: &str,
+    port: u16,
     username: &str,
     auth: &SshAuth,
 ) -> NetconfClientResult<()> {
-    match auth {
-        SshAuth::Password(password) => {
-            session
-                .userauth_password(username, password.as_str())
-                .await
-                .ssh()?;
-        }
-        SshAuth::Agent => {
-            session.userauth_agent_with_try_next(username).await.ssh()?;
-        }
+    let success = match auth {
+        SshAuth::Password(password) => session
+            .authenticate_password(username, password.as_str())
+            .await
+            .map_err(map_russh)?
+            .success(),
+        SshAuth::Agent => authenticate_agent(session, username).await?,
         SshAuth::KeyFile { path, passphrase } => {
-            session
-                .userauth_pubkey_file(
-                    username,
-                    None::<&Path>,
-                    path,
-                    passphrase.as_deref().map(String::as_str),
-                )
-                .await
-                .ssh()?;
+            authenticate_key_file(
+                session,
+                username,
+                path,
+                passphrase.as_ref().map(|secret| secret.as_str()),
+            )
+            .await?
         }
+    };
+    if success {
+        Ok(())
+    } else {
+        Err(NetconfClientError::new(format!(
+            "SSH authentication failed for {username}@{host}:{port}"
+        )))
     }
-    Ok(())
 }
 
-fn ssh_err(err: async_ssh2_lite::Error) -> NetconfClientError {
-    match err {
-        async_ssh2_lite::Error::Io(io) => NetconfClientError::Io(io),
-        other => {
-            if other.as_ssh2().is_some_and(is_ssh2_eof) {
-                return NetconfClientError::Io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    other.to_string(),
-                ));
+async fn authenticate_key_file(
+    session: &mut Handle<ClientHandler>,
+    username: &str,
+    path: &Path,
+    passphrase: Option<&str>,
+) -> NetconfClientResult<bool> {
+    let key = keys::load_secret_key(path, passphrase).map_err(map_keys)?;
+    let hash = session
+        .best_supported_rsa_hash()
+        .await
+        .map_err(map_russh)?
+        .flatten();
+    Ok(session
+        .authenticate_publickey(username, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
+        .await
+        .map_err(map_russh)?
+        .success())
+}
+
+async fn authenticate_agent(
+    session: &mut Handle<ClientHandler>,
+    username: &str,
+) -> NetconfClientResult<bool> {
+    let mut agent = connect_agent().await?;
+    let identities = agent.request_identities().await.map_err(map_keys)?;
+    if identities.is_empty() {
+        return Ok(false);
+    }
+    let hash = session
+        .best_supported_rsa_hash()
+        .await
+        .map_err(map_russh)?
+        .flatten();
+    for identity in identities {
+        let result = match identity {
+            AgentIdentity::PublicKey { key, comment } => {
+                debug!("trying ssh-agent identity {comment}");
+                session
+                    .authenticate_publickey_with(username, key, hash, &mut agent)
+                    .await
             }
-            let message = match other.as_ssh2() {
-                Some(ssh2) => ssh2.to_string(),
-                None => match other.as_other() {
-                    Some(inner) => inner.to_string(),
-                    None => other.to_string(),
-                },
-            };
-            NetconfClientError::Ssh(message)
+            AgentIdentity::Certificate {
+                certificate,
+                comment,
+            } => {
+                debug!("trying ssh-agent certificate {comment}");
+                session
+                    .authenticate_certificate_with(username, certificate, hash, &mut agent)
+                    .await
+            }
+        };
+        match result {
+            Ok(auth) if auth.success() => return Ok(true),
+            Ok(_) => continue,
+            Err(err) => {
+                debug!("ssh-agent identity rejected: {err}");
+            }
         }
     }
+    Ok(false)
 }
 
-fn is_ssh2_eof(err: &ssh2::Error) -> bool {
-    let msg = err.message();
-    msg.eq_ignore_ascii_case("end of file")
-        || msg.eq_ignore_ascii_case("eof sent")
-        || msg.eq_ignore_ascii_case("socket disconnected")
-}
+type DynAgent = AgentClient<Box<dyn keys::agent::client::AgentStream + Send + Unpin>>;
 
-trait MapSsh<T> {
-    fn ssh(self) -> NetconfClientResult<T>;
-}
-
-impl<T> MapSsh<T> for Result<T, async_ssh2_lite::Error> {
-    fn ssh(self) -> NetconfClientResult<T> {
-        self.map_err(ssh_err)
+async fn connect_agent() -> NetconfClientResult<DynAgent> {
+    #[cfg(unix)]
+    {
+        AgentClient::connect_env()
+            .await
+            .map(AgentClient::dynamic)
+            .map_err(map_keys)
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(sock) = std::env::var("SSH_AUTH_SOCK")
+            && let Ok(client) = AgentClient::connect_named_pipe(&sock).await
+        {
+            return Ok(client.dynamic());
+        }
+        if let Ok(client) = AgentClient::connect_named_pipe(r"\\.\pipe\openssh-ssh-agent").await {
+            return Ok(client.dynamic());
+        }
+        AgentClient::connect_pageant()
+            .await
+            .map(AgentClient::dynamic)
+            .map_err(map_keys)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(NetconfClientError::new(
+            "ssh-agent is not supported on this platform",
+        ))
     }
 }
 
-const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+fn map_connect(err: SshConnectError) -> NetconfClientError {
+    match err {
+        SshConnectError::Client(err) => err,
+        SshConnectError::Protocol(err) => map_russh(err),
+    }
+}
 
-fn base64_nopad(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    let mut chunks = input.chunks_exact(3);
-    for chunk in chunks.by_ref() {
-        let n = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
-        out.push(B64[((n >> 18) & 0x3f) as usize] as char);
-        out.push(B64[((n >> 12) & 0x3f) as usize] as char);
-        out.push(B64[((n >> 6) & 0x3f) as usize] as char);
-        out.push(B64[(n & 0x3f) as usize] as char);
+fn map_russh(err: russh::Error) -> NetconfClientError {
+    match err {
+        russh::Error::IO(io) => NetconfClientError::Io(io),
+        russh::Error::HUP | russh::Error::Disconnect | russh::Error::RecvError => {
+            NetconfClientError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                err.to_string(),
+            ))
+        }
+        other => NetconfClientError::Ssh(other.to_string()),
     }
-    let rem = chunks.remainder();
-    if rem.len() == 1 {
-        let n = u32::from(rem[0]) << 16;
-        out.push(B64[((n >> 18) & 0x3f) as usize] as char);
-        out.push(B64[((n >> 12) & 0x3f) as usize] as char);
-    } else if rem.len() == 2 {
-        let n = (u32::from(rem[0]) << 16) | (u32::from(rem[1]) << 8);
-        out.push(B64[((n >> 18) & 0x3f) as usize] as char);
-        out.push(B64[((n >> 12) & 0x3f) as usize] as char);
-        out.push(B64[((n >> 6) & 0x3f) as usize] as char);
+}
+
+fn map_keys(err: keys::Error) -> NetconfClientError {
+    match err {
+        keys::Error::IO(io) => NetconfClientError::Io(io),
+        other => NetconfClientError::Ssh(other.to_string()),
     }
-    out
 }
 
 #[cfg(test)]
@@ -959,17 +1098,17 @@ mod tests {
     }
 
     #[test]
-    fn known_hosts_reason_maps_libssh2_results() {
+    fn known_hosts_reason_maps_check_results() {
         assert_eq!(
-            known_hosts_reason(ssh2::CheckResult::Mismatch),
+            known_hosts_reason(KnownHostsCheck::Mismatch),
             "key does not match known_hosts"
         );
         assert_eq!(
-            known_hosts_reason(ssh2::CheckResult::NotFound),
+            known_hosts_reason(KnownHostsCheck::NotFound),
             "host not in known_hosts"
         );
         assert_eq!(
-            known_hosts_reason(ssh2::CheckResult::Failure),
+            known_hosts_reason(KnownHostsCheck::Failure),
             "known_hosts check failed"
         );
     }
@@ -977,21 +1116,41 @@ mod tests {
     #[test]
     fn accept_new_pins_unknown_and_rejects_mismatch() {
         assert_eq!(
-            known_hosts_action(ssh2::CheckResult::NotFound, true),
+            known_hosts_action_from(KnownHostsCheck::NotFound, true),
             KnownHostsAction::Pin
         );
         assert_eq!(
-            known_hosts_action(ssh2::CheckResult::Mismatch, true),
+            known_hosts_action_from(KnownHostsCheck::Mismatch, true),
             KnownHostsAction::Reject("key does not match known_hosts")
         );
         assert_eq!(
-            known_hosts_action(ssh2::CheckResult::NotFound, false),
+            known_hosts_action_from(KnownHostsCheck::NotFound, false),
             KnownHostsAction::Reject("host not in known_hosts")
         );
         assert_eq!(
-            known_hosts_action(ssh2::CheckResult::Match, true),
+            known_hosts_action_from(KnownHostsCheck::Match, true),
             KnownHostsAction::Allow
         );
+    }
+
+    #[test]
+    fn classify_known_hosts_maps_russh_results() {
+        assert!(matches!(
+            classify_known_hosts(Ok(true)),
+            KnownHostsCheck::Match
+        ));
+        assert!(matches!(
+            classify_known_hosts(Ok(false)),
+            KnownHostsCheck::NotFound
+        ));
+        assert!(matches!(
+            classify_known_hosts(Err(keys::Error::KeyChanged { line: 3 })),
+            KnownHostsCheck::Mismatch
+        ));
+        assert!(matches!(
+            classify_known_hosts(Err(keys::Error::CouldNotReadKey)),
+            KnownHostsCheck::Failure
+        ));
     }
 
     #[test]
@@ -1006,7 +1165,7 @@ mod tests {
 
     #[test]
     fn ssh_err_wraps_without_leaking_the_crate_type() {
-        let io = ssh_err(async_ssh2_lite::Error::Io(std::io::Error::new(
+        let io = map_russh(russh::Error::IO(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             "pipe closed",
         )));
@@ -1014,9 +1173,14 @@ mod tests {
             matches!(&io, NetconfClientError::Io(err) if err.kind() == std::io::ErrorKind::UnexpectedEof),
             "{io:?}"
         );
-        let other = ssh_err(async_ssh2_lite::Error::Other("auth failed".into()));
+        let eof = map_russh(russh::Error::HUP);
         assert!(
-            matches!(&other, NetconfClientError::Ssh(msg) if msg.contains("auth failed")),
+            matches!(&eof, NetconfClientError::Io(err) if err.kind() == std::io::ErrorKind::UnexpectedEof),
+            "{eof:?}"
+        );
+        let other = map_russh(russh::Error::NotAuthenticated);
+        assert!(
+            matches!(&other, NetconfClientError::Ssh(msg) if msg.to_ascii_lowercase().contains("authenticated")),
             "{other:?}"
         );
     }
@@ -1061,16 +1225,6 @@ mod tests {
     }
 
     #[test]
-    fn base64_nopad_encodes_sha256_of_empty() {
-        // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-        let hash = hex_bytes("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-        assert_eq!(
-            base64_nopad(&hash),
-            "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
-        );
-    }
-
-    #[test]
     fn ssh_auth_debug_redacts_secrets() {
         let password = format!("{:?}", SshAuth::password("secret"));
         assert!(!password.contains("secret"), "{password}");
@@ -1079,10 +1233,52 @@ mod tests {
         assert!(key.contains("/tmp/id"), "{key}");
     }
 
-    fn hex_bytes(hex: &str) -> Vec<u8> {
-        (0..hex.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
-            .collect()
+    #[test]
+    fn parse_kex_keeps_known_and_appends_extensions() {
+        let parsed = parse_kex("curve25519-sha256,not-a-real-kex").unwrap();
+        assert!(parsed.contains(&russh::kex::CURVE25519));
+        assert!(parsed.contains(&russh::kex::EXTENSION_SUPPORT_AS_CLIENT));
+        assert!(parsed.contains(&russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT));
+        assert_eq!(parsed[0], russh::kex::CURVE25519);
+    }
+
+    #[test]
+    fn parse_kex_rejects_empty_or_unknown_only() {
+        assert!(parse_kex("").is_err());
+        assert!(parse_kex("not-a-real-kex").is_err());
+    }
+
+    #[test]
+    fn parse_ciphers_and_macs_keep_known() {
+        let ciphers = parse_ciphers("aes256-ctr,chacha20-poly1305@openssh.com").unwrap();
+        assert_eq!(ciphers[0], russh::cipher::AES_256_CTR);
+        assert_eq!(ciphers[1], russh::cipher::CHACHA20_POLY1305);
+        let macs = parse_macs("hmac-sha2-256,hmac-sha2-512").unwrap();
+        assert_eq!(macs[0], russh::mac::HMAC_SHA256);
+        assert_eq!(macs[1], russh::mac::HMAC_SHA512);
+    }
+
+    #[test]
+    fn parse_host_keys_keeps_known() {
+        let keys = parse_host_keys("ssh-ed25519,rsa-sha2-256").unwrap();
+        assert_eq!(keys[0], russh::keys::Algorithm::Ed25519);
+        assert_eq!(
+            keys[1],
+            russh::keys::Algorithm::Rsa {
+                hash: Some(HashAlg::Sha256)
+            }
+        );
+    }
+
+    #[test]
+    fn build_client_config_maps_compression_and_keepalive() {
+        let opts = SshSessionOpts::new()
+            .compression(true)
+            .keepalive(Duration::from_secs(15))
+            .ciphers("aes256-ctr");
+        let cfg = build_client_config(&opts).unwrap();
+        assert_eq!(cfg.keepalive_interval, Some(Duration::from_secs(15)));
+        assert_eq!(cfg.preferred.cipher[0], russh::cipher::AES_256_CTR);
+        assert_eq!(cfg.preferred.compression[0], russh::compression::ZLIB);
     }
 }

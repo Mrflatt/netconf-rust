@@ -280,7 +280,7 @@ fn ssh_auth(password: &Option<String>, params: &HostParams) -> SshAuth {
 
 /// How the CLI should treat SSH host keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostKeyCheck {
+pub(crate) enum HostKeyCheck {
     /// Accept any key.
     Off,
     /// Reject unknown hosts and changed keys.

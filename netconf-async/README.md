@@ -18,12 +18,7 @@ netconf-async = "0.1"
 
 Requires rustc **1.85+** (edition 2024).
 
-Default features pull in Tokio and SSH. To vendor OpenSSL (typical for Linux
-release binaries):
-
-```toml
-netconf-async = { version = "0.1", features = ["vendored-openssl"] }
-```
+Default features pull in Tokio and SSH (`russh`, pure Rust).
 
 ## Example
 
@@ -115,10 +110,8 @@ crate generates around them stays XML-escaped. `RpcReply::errors()` exposes each
 
 | Feature | Default | Purpose |
 |---|---|---|
-| `ssh` | yes | `SSHTransport` over `async-ssh2-lite` (implies `tokio`) |
+| `ssh` | yes | `SSHTransport` over `russh` (implies `tokio`) |
 | `tokio` | yes | Tokio framer, RPC timeouts, notification streams |
-| `vendored-openssl` | no | static OpenSSL |
-| `openssl-on-win32` | no | OpenSSL instead of WinCNG on Windows |
 
 ## Related
 

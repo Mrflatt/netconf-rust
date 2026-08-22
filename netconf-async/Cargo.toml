@@ -16,19 +16,17 @@ include = ["src/**/*", "tests/**/*", "LICENSE", "README.md", "CHANGELOG.md"]
 
 [features]
 default = ["ssh"]
-# NETCONF over SSH via `async-ssh2-lite`.
-ssh = ["dep:async-ssh2-lite", "dep:zeroize", "tokio", "tokio/net", "tokio/rt"]
+# NETCONF over SSH via `russh`.
+ssh = ["dep:russh", "dep:zeroize", "tokio", "tokio/net"]
 # Tokio-backed framer, RPC timeouts, and notification streams.
 tokio = ["dep:tokio"]
-vendored-openssl = ["ssh", "async-ssh2-lite/vendored-openssl"]
-openssl-on-win32 = ["ssh", "async-ssh2-lite/openssl-on-win32"]
 
 [dependencies]
-async-ssh2-lite = { version = "0.5", features = ["tokio"], optional = true, default-features = false }
 async-trait = "0.1"
 log = { version = "0.4", features = ["std"] }
 memchr = "2"
 quick-xml = { version = "0.41", features = ["serialize", "overlapped-lists"] }
+russh = { version = "0.63", optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 time = { version = "0.3", default-features = false, features = ["serde", "std", "formatting"] }

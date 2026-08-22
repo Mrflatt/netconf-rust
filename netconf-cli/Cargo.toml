@@ -5,9 +5,6 @@ edition = "2024"
 authors = ["Lauri Huotari <65590793+Mrflatt@users.noreply.github.com>"]
 description = "Netconf cli tool written in Rust"
 
-[features]
-vendored-openssl = ["netconf-async/vendored-openssl"]
-
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "cargo"] }

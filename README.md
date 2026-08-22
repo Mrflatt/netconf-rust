@@ -97,10 +97,8 @@ Other methods on `Connection`: `edit_config`, `copy_config`, `delete_config`, `l
 
 | Feature | Default | Purpose |
 |---|---|---|
-| `ssh` | yes | `SSHTransport` over `async-ssh2-lite` (implies `tokio`) |
+| `ssh` | yes | `SSHTransport` over `russh` (implies `tokio`) |
 | `tokio` | yes | Tokio framer, RPC timeouts, notification streams |
-| `vendored-openssl` | no | static OpenSSL |
-| `openssl-on-win32` | no | OpenSSL instead of WinCNG on Windows |
 
 ## CLI
 
@@ -187,8 +185,8 @@ netconf-cli get-config --host router
 | Flag | Effect |
 |---|---|
 | _(none)_ | info, library quiet |
-| `-v` | debug, library quiet |
-| `-vv` | debug + connection |
+| `-v` | debug, library quiet (no russh / ssh2_config) |
+| `-vv` | debug + connection + russh / ssh2_config |
 | `-vvv` | debug including RPC frames |
 | `-q` | no logs |
 

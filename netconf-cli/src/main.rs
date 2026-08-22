@@ -9,25 +9,31 @@ mod commands;
 mod config;
 mod update;
 
+fn quiet_libraries(builder: &mut Builder) {
+    builder.filter_module("netconf_async", LevelFilter::Off);
+    builder.filter_module("russh", LevelFilter::Off);
+    builder.filter_module("ssh2_config", LevelFilter::Off);
+}
+
 fn init_logging(verbosity: &u8) {
     let mut builder = Builder::new();
     match verbosity {
         1 => {
             builder.filter_level(LevelFilter::Debug);
-            builder.filter_module("netconf_async", LevelFilter::Off)
+            quiet_libraries(&mut builder);
         }
         2 => {
             builder.filter_level(LevelFilter::Debug);
             builder.filter_module("netconf_async::framer::async_framer", LevelFilter::Off);
-            builder.filter_module("netconf_async::connection", LevelFilter::Debug)
+            builder.filter_module("netconf_async::connection", LevelFilter::Debug);
         }
         3 => {
             builder.filter_level(LevelFilter::Debug);
-            builder.filter_module("netconf_async", LevelFilter::Debug)
+            builder.filter_module("netconf_async", LevelFilter::Debug);
         }
         _ => {
             builder.filter_level(LevelFilter::Info);
-            builder.filter_module("netconf_async", LevelFilter::Off)
+            quiet_libraries(&mut builder);
         }
     };
     builder.target(Target::Stdout);

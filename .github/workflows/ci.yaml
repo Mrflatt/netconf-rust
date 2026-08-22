@@ -108,7 +108,6 @@ jobs:
             os: ubuntu-latest
             rust: stable
             other: x86_64-unknown-linux-gnu
-            features: --features vendored-openssl
           - name: Linux aarch64 stable
             os: ubuntu-latest
             rust: stable
@@ -141,11 +140,8 @@ jobs:
       - name: Add rustfmt
         if: matrix.os == 'ubuntu-latest'
         run: rustup component add rustfmt || echo "rustfmt not available"
-      # Windows libssh2 uses WinCNG. vendored-openssl needs Strawberry Perl;
-      # Git's MSYS perl is on PATH in bash and breaks OpenSSL Configure.
-      # Linux x86_64 matches the release binary: --features vendored-openssl.
       - name: Run tests
-        run: cargo test ${{ matrix.features }}
+        run: cargo test
 
   release:
     if: ${{ github.event_name != 'pull_request' }}

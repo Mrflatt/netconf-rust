@@ -21,9 +21,7 @@ cargo update -p netconf-cli --locked
 cargo run -p netconf-cli -- --help
 ```
 
-Windows CI is plain `cargo test` (libssh2 WinCNG). Do not enable
-`vendored-openssl` there — Git's MSYS perl breaks OpenSSL Configure.
-Linux x86_64 CI uses `--features vendored-openssl` to match release binaries.
+SSH is `russh` (pure Rust). No OpenSSL.
 
 Toolchain is `stable` from `rust-toolchain.toml` (includes `rustfmt`, `clippy`). No `rustfmt.toml` / `clippy.toml` — rustfmt defaults, clippy `-D warnings`.
 
@@ -102,7 +100,7 @@ Implemented CLI subcommands: `get`, `get-config`, `edit`, `copy`, `commit`, `rpc
 - Rust **edition 2024**, workspace resolver **3**. `rust-version = "1.85"` on `netconf-async`; CI uses current stable.
 - Tokio 1 (multi-thread). Traits use `async-trait`.
 - XML via `quick-xml` + `serde` (derive feature). Substring search via `memchr`.
-- SSH: `async-ssh2-lite` (tokio) inside the library only. CLI parses `~/.ssh/config` with `ssh2-config` and calls `SSHTransport::connect`.
+- SSH: `russh` (tokio) inside the library only. CLI parses `~/.ssh/config` with `ssh2-config` and calls `SSHTransport::connect`.
 - Errors: `thiserror` → `NetconfClientError`, alias `NetconfClientResult<T>`.
 - CLI: clap 4 builder API (not derive on command structs), `env_logger`, `color-print`.
 
@@ -110,10 +108,8 @@ Library features (`netconf-async`):
 
 | Feature | Default | Notes |
 |---|---|---|
-| `ssh` | yes | `transport::ssh`; implies `tokio` |
+| `ssh` | yes | `transport::ssh` via `russh`; implies `tokio` |
 | `tokio` | yes | `AsyncFramer`, RPC timeouts, notifications |
-| `vendored-openssl` | no | forwarded to `async-ssh2-lite` |
-| `openssl-on-win32` | no | Windows CI |
 
 `async-trait` is a plain dependency: the `Transport` and `Framer` traits need it
 unconditionally, so it must not be optional. Every feature combination has to
@@ -131,7 +127,7 @@ Session flow:
 4. Each RPC is `write_and_receive`. Reply is parsed as `RpcReply`; `message-id` must match (mismatch desynchronizes). Error-severity `<rpc-error>` becomes `NetconfClientError::Netconf`. Warning-only is success unless `set_warnings_as_errors(true)`. EOF after `<commit>` / `<commit-configuration>` is `CommitUnknown` — thread `is_commit` through the send, never a session flag.
 5. `close_session` sends the RPC and then closes the transport. `Drop` cannot await I/O, so it only warns when the session is still open.
 
-`SSHTransport::connect(SshConfig)` owns TCP, auth (`SshAuth::{Password,Agent,KeyFile}`), ProxyJump chain (`SshConfig::jump` appends hops), host-key policy (`RejectAll` default, `Fingerprint`, `KnownHosts`, `AcceptAll` lab opt-in), and session knobs (`SshSessionOpts`: compression, keepalive, kex/cipher/mac prefs). Each hop is a loopback `direct-tcpip` tunnel — do not wrap the channel as a socket. Do not leak `AsyncSession` or `async_ssh2_lite::Error` (`NetconfClientError::Ssh` is a `String`). CLI maps `IdentityFile`. Host keys default to `accept-new` (pin unknown, reject changed). `--strict-host-key-checking` / `StrictHostKeyChecking`: `yes`, `accept-new`, `no`.
+`SSHTransport::connect(SshConfig)` owns TCP, auth (`SshAuth::{Password,Agent,KeyFile}`), ProxyJump chain (`SshConfig::jump` appends hops), host-key policy (`RejectAll` default, `Fingerprint`, `KnownHosts`, `AcceptAll` lab opt-in), and session knobs (`SshSessionOpts`: compression, keepalive, kex/cipher/mac prefs). Each hop is a russh `direct-tcpip` channel used as the next handshake stream. Do not leak `russh` types (`NetconfClientError::Ssh` is a `String`). CLI maps `IdentityFile`. Host keys default to `accept-new` (pin unknown, reject changed). `--strict-host-key-checking` / `StrictHostKeyChecking`: `yes`, `accept-new`, `no`.
 
 `Connection::set_parse_replies(false)` skips the reply parse and returns raw XML.
 `Connection::set_timeout` bounds one RPC; on timeout the session is marked
@@ -150,7 +146,7 @@ Repo has immutable GitHub releases: a published release cannot gain or change as
 
 `GITHUB_TOKEN` cannot trigger a second workflow, so binaries run in the same CI run. workflow_dispatch can finish a leftover draft; it cannot patch an already-published release.
 
-Assets: `netconf-cli-{version}-{target}.tar.gz`. Linux builds use `--features vendored-openssl`. Windows must not.
+Assets: `netconf-cli-{version}-{target}.tar.gz`.
 
 `netconf update` polls `Mrflatt/netconf-rust` releases, ignores `netconf-async-*` tags, verifies GitHub's asset `digest`, then `self_replace`. It does **not** open a device session.
 
