@@ -5,6 +5,13 @@ edition = "2024"
 authors = ["Lauri Huotari <flatlate@gmail.com>"]
 description = "Netconf cli tool written in Rust"
 
+[features]
+vendored-openssl = [
+    "netconf-async/vendored-openssl",
+    "async-ssh2-lite/vendored-openssl",
+    "ssh2/vendored-openssl",
+]
+
 [dependencies]
 anyhow = "1"
 async-ssh2-lite = { version = "0.5", features = ["tokio"] }
@@ -12,9 +19,21 @@ clap = { version = "4", features = ["derive", "env", "cargo"] }
 color-print = "0.3"
 dirs = "6"
 env_logger = "0.11"
+flate2 = "1"
 futures = "0.3"
 log = { version = "0.4", features = ["std"] }
 netconf-async = { version = "0.1.0", path = "../netconf-async" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+self-replace = "1"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 ssh2 = "0.9"
 ssh2-config = "0.7"
+tar = "0.4"
+tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+
+[dev-dependencies]
+wiremock = "0.6"

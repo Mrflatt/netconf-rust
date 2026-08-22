@@ -1,0 +1,133 @@
+name: Release binaries
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to attach binaries to
+        required: true
+        type: string
+      version:
+        description: Version string without a leading v
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach binaries to (e.g. netconf-cli-v0.1.0)
+        required: true
+        type: string
+      version:
+        description: Version string without a leading v (defaults to tag minus netconf-cli-v)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C strip=symbols"
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - id: meta
+        run: |
+          tag="${{ inputs.tag }}"
+          version="${{ inputs.version }}"
+          if [ -z "$version" ]; then
+            version="${tag#netconf-cli-v}"
+            version="${version#v}"
+          fi
+          if [ -z "$tag" ] || [ -z "$version" ]; then
+            echo "tag and version are required" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            features: --features vendored-openssl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            features: --features vendored-openssl
+          - os: macos-14
+            target: aarch64-apple-darwin
+            features: ""
+          - os: macos-14
+            target: x86_64-apple-darwin
+            features: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: ""
+    name: ${{ matrix.target }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+      - name: Update rust
+        run: rustup update --no-self-update stable && rustup default stable
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked -p netconf-cli --target ${{ matrix.target }} ${{ matrix.features }}
+      - name: Package
+        shell: bash
+        run: |
+          version="${{ needs.meta.outputs.version }}"
+          target="${{ matrix.target }}"
+          ext=""
+          case "$target" in
+            *-windows-*) ext=".exe" ;;
+          esac
+          bin="target/${target}/release/netconf-cli${ext}"
+          test -f "$bin"
+          stage="$(mktemp -d)"
+          cp "$bin" "${stage}/netconf-cli${ext}"
+          asset="netconf-cli-${version}-${target}.tar.gz"
+          tar -C "$stage" -czf "$asset" "netconf-cli${ext}"
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  publish:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Attach assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -la
+          # Draft is still mutable. Publish last — immutable releases freeze it.
+          gh release upload "${{ needs.meta.outputs.tag }}" \
+            netconf-cli-*.tar.gz \
+            --repo "${{ github.repository }}"
+          gh release edit "${{ needs.meta.outputs.tag }}" \
+            --draft=false \
+            --repo "${{ github.repository }}"

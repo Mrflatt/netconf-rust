@@ -35,7 +35,7 @@ The crates are not published to crates.io yet. Use the git workspace:
 netconf-async = { git = "https://github.com/Mrflatt/netconf-rust" }
 ```
 
-CLI:
+CLI from source:
 
 ```bash
 git clone https://github.com/Mrflatt/netconf-rust.git
@@ -43,6 +43,19 @@ cd netconf-rust
 cargo install --path netconf-cli
 # or without installing:
 cargo run -p netconf-cli -- --help
+```
+
+Or download a release archive for your target and extract `netconf-cli`:
+
+```text
+netconf-cli-{version}-{target}.tar.gz
+```
+
+Targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
+
+```bash
+netconf-cli update          # install latest GitHub release
+netconf-cli update --check  # report only
 ```
 
 ## Library
@@ -109,6 +122,10 @@ netconf-cli notification --host router.example --username netconf --get   # list
 
 # several devices in parallel
 netconf-cli get-config --host r1.example,r2.example --username netconf
+
+# self-update from GitHub Releases
+netconf-cli update
+netconf-cli update --check
 ```
 
 From the workspace without installing, prefix the same arguments with `cargo run -p netconf-cli --`.
@@ -147,6 +164,8 @@ netconf-cli get-config --host router
 | `NETCONF_USERNAME` | Username |
 | `NETCONF_PASSWORD` | Password (hidden in help) |
 | `NETCONF_WITH_DEFAULTS` | `report-all`, `report-all-tagged`, `trim`, `explicit` |
+| `NETCONF_RELEASE_REPO` | GitHub `owner/repo` for `update` (default `Mrflatt/netconf-rust`) |
+| `NETCONF_GITHUB_TOKEN` / `GH_TOKEN` | Optional token for GitHub API rate limits |
 
 ### Logging
 

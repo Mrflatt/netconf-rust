@@ -105,6 +105,7 @@ pub fn cli() -> Command {
     <cyan,bold>copy</>              Execute copy-config rpc
     <cyan,bold>rpc</>               Execute raw rpc
     <cyan,bold>notification</>      Start netconf notification listener
+    <cyan,bold>update</>            Update netconf-cli from GitHub releases
 
 See '<cyan,bold>netconf help</> <cyan><<command>></>' for more information on a specific command.\n",
         ))
@@ -124,6 +125,7 @@ See '<cyan,bold>netconf help</> <cyan><<command>></>' for more information on a 
                 .hide_env(true),
         ])
         .subcommands(builtin())
+        .subcommand(crate::commands::update::cli())
 }
 
 fn global_opt(name: &'static str, help: &'static str) -> Arg {
