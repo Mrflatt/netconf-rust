@@ -113,7 +113,7 @@ Library features (`netconf-async`):
 | `vendored-openssl` | no | forwarded to `async-ssh2-lite` |
 | `openssl-on-win32` | no | Windows CI |
 
-`lib.rs` crate docs still say `netconf-async = "^0.2.0"`. Package version is **0.1.0**. Do not copy the `0.2.0` line.
+Crate-level rustdoc lives in `netconf-async/src/lib.rs`; crates.io renders `netconf-async/README.md`. Do not hardcode a crate version that does not match `Cargo.toml`.
 
 ## Protocol notes
 

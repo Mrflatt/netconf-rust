@@ -3,13 +3,15 @@ name = "netconf-async"
 version = "0.1.0"
 edition = "2024"
 authors = ["Lauri Huotari <65590793+Mrflatt@users.noreply.github.com>"]
-description = "A Rust NETCONF library"
+description = "Async NETCONF client (RFC 6241) over SSH"
 license = "MIT"
 repository = "https://github.com/Mrflatt/netconf-rust"
+homepage = "https://github.com/Mrflatt/netconf-rust"
+documentation = "https://docs.rs/netconf-async"
 categories = ["asynchronous", "network-programming"]
-keywords = ["network", "netconf", "async"]
+keywords = ["netconf", "yang", "ssh", "async", "network"]
 readme = "README.md"
-include = ["src/**/*", "../LICENSE", "README.md", "CHANGELOG.md"]
+include = ["src/**/*", "LICENSE", "README.md", "CHANGELOG.md"]
 
 [features]
 default = ["async-trait", "async-ssh2-lite", "tokio"]
@@ -27,9 +29,13 @@ serde = "1"
 serde_derive = "1"
 thiserror = "2"
 time = { version = "0.3", default-features = false, features = ["serde", "std", "formatting"] }
-tokio = { version = "1", features = ["io-std", "net", "rt-multi-thread", "signal", "sync"], default-features = false, optional = true }
+tokio = { version = "1", features = ["io-std", "macros", "net", "rt-multi-thread", "signal", "sync"], default-features = false, optional = true }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
 pretty_assertions = "1"
 tokio = { version = "1", features = ["macros"] }
+
+[package.metadata.docs.rs]
+all-features = false
+rustdoc-args = ["--cfg", "docsrs", "--generate-link-to-definition"]

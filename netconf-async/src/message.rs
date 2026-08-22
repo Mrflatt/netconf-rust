@@ -1,3 +1,4 @@
+//! NETCONF messages: `<hello>`, `<rpc>`, `<rpc-reply>`, and operation bodies.
 #![allow(dead_code)]
 use crate::{NETCONF_URN, error};
 use core::fmt;
@@ -11,6 +12,9 @@ use serde_derive::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+/// `<hello>` advertisement ([RFC6241 8.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-8.1)).
+///
+/// [`Hello::new`] advertises `:base:1.0` and `:base:1.1`.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename(serialize = "hello"))]
 pub struct Hello {
@@ -22,6 +26,7 @@ pub struct Hello {
 }
 
 impl Hello {
+    /// Client hello advertising `:base:1.0` and `:base:1.1`.
     pub fn new() -> Hello {
         Hello {
             xmlns: NETCONF_URN.to_string(),
@@ -35,6 +40,7 @@ impl Hello {
         }
     }
 
+    /// Capability URNs advertised in this hello.
     pub fn capabilities(&self) -> Vec<String> {
         self.capabilities
             .capability
@@ -43,6 +49,7 @@ impl Hello {
             .collect()
     }
 
+    /// Exact-string match against advertised capabilities (query string kept).
     pub fn has_capability(&self, capability: &str) -> bool {
         self.capabilities
             .capability
@@ -50,6 +57,7 @@ impl Hello {
             .any(|cap| cap == capability)
     }
 
+    /// Server-assigned session-id, present only on the server hello.
     pub fn session_id(&self) -> Option<u64> {
         self.session_id
     }
@@ -65,11 +73,13 @@ impl Display for Hello {
     }
 }
 
+/// `<capabilities>` list inside `<hello>`.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Capabilities {
     capability: Vec<String>,
 }
 
+/// `<rpc>` envelope with a generated `message-id` ([RFC6241 4.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-4.1)).
 #[derive(Debug, Serialize)]
 pub struct Rpc {
     #[serde(rename = "@message-id")]
@@ -81,6 +91,7 @@ pub struct Rpc {
 }
 
 impl Rpc {
+    /// Wrap `operation` and assign a UUID `message-id`.
     pub fn new_with_operation(operation: RpcOperation) -> Rpc {
         Rpc {
             xmlns: NETCONF_URN.to_string(),
@@ -111,6 +122,7 @@ impl Display for Rpc {
     }
 }
 
+/// Body of an `<rpc>` ([RFC6241 7](https://www.rfc-editor.org/rfc/rfc6241.html#section-7)).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RpcOperation {
@@ -142,6 +154,7 @@ pub enum RpcOperation {
 }
 
 impl RpcOperation {
+    /// `<get-config>` ([RFC6241 7.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.1)).
     pub fn new_get_config(
         datastore: Datastore,
         filter: Option<Filter>,
@@ -157,6 +170,7 @@ impl RpcOperation {
         })
     }
 
+    /// `<get>` ([RFC6241 7.7](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.7)).
     pub fn new_get(filter: Option<Filter>, defaults: Option<WithDefaultsValue>) -> RpcOperation {
         RpcOperation::Get(Get {
             filter,
@@ -167,6 +181,7 @@ impl RpcOperation {
         })
     }
 
+    /// `<commit>`, optionally confirmed ([RFC6241 8.3](https://www.rfc-editor.org/rfc/rfc6241.html#section-8.3), [8.4](https://www.rfc-editor.org/rfc/rfc6241.html#section-8.4)).
     pub fn new_commit(
         confirmed: Option<()>,
         confirm_timeout: Option<i32>,
@@ -181,6 +196,7 @@ impl RpcOperation {
         })
     }
 
+    /// `<create-subscription>` ([RFC5277 2.1.1](https://www.rfc-editor.org/rfc/rfc5277.html#section-2.1.1)).
     pub fn new_create_subscription(
         stream: Option<&str>,
         filter: Option<Filter>,
@@ -201,6 +217,7 @@ impl RpcOperation {
         })
     }
 
+    /// `<edit-config>` ([RFC6241 7.2](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.2)).
     pub fn new_edit_config(
         target: Datastore,
         content: EditContent,
@@ -222,6 +239,7 @@ impl RpcOperation {
         })
     }
 
+    /// `<copy-config>` ([RFC6241 7.3](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.3)).
     pub fn new_copy_config(source: CopySource, target: Datastore) -> RpcOperation {
         let source = match source {
             CopySource::Config(xml) => CopySource::Config(strip_config_wrapper(&xml).to_string()),
@@ -233,33 +251,39 @@ impl RpcOperation {
         })
     }
 
+    /// `<delete-config>` ([RFC6241 7.4](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.4)).
     pub fn new_delete_config(target: Datastore) -> RpcOperation {
         RpcOperation::DeleteConfig {
             target: Target { datastore: target },
         }
     }
 
+    /// `<lock>` ([RFC6241 7.5](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.5)).
     pub fn new_lock(target: Datastore) -> RpcOperation {
         RpcOperation::Lock {
             target: Target { datastore: target },
         }
     }
 
+    /// `<unlock>` ([RFC6241 7.6](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.6)).
     pub fn new_unlock(target: Datastore) -> RpcOperation {
         RpcOperation::Unlock {
             target: Target { datastore: target },
         }
     }
 
+    /// `<discard-changes>` ([RFC6241 8.3.4.2](https://www.rfc-editor.org/rfc/rfc6241.html#section-8.3.4.2)).
     pub fn new_discard_changes() -> RpcOperation {
         RpcOperation::DiscardChanges
     }
 
+    /// `<cancel-commit>` ([RFC6241 8.4.4.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-8.4.4.1)).
     pub fn new_cancel_commit(persist_id: Option<String>) -> RpcOperation {
         RpcOperation::CancelCommit(CancelCommit { persist_id })
     }
 }
 
+/// `<commit>` body ([RFC6241 8.3](https://www.rfc-editor.org/rfc/rfc6241.html#section-8.3), [8.4](https://www.rfc-editor.org/rfc/rfc6241.html#section-8.4)).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Commit {
@@ -273,6 +297,7 @@ pub struct Commit {
     persist_id: Option<String>,
 }
 
+/// `<get>` body ([RFC6241 7.7](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.7)).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Get {
@@ -282,6 +307,7 @@ pub struct Get {
     with_defaults: Option<WithDefaults>,
 }
 
+/// `<get-config>` body ([RFC6241 7.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.1)).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct GetConfig {
@@ -292,6 +318,7 @@ pub struct GetConfig {
     with_defaults: Option<WithDefaults>,
 }
 
+/// `with-defaults` element ([RFC6243](https://www.rfc-editor.org/rfc/rfc6243.html)).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct WithDefaults {
@@ -301,6 +328,7 @@ pub struct WithDefaults {
     value: WithDefaultsValue,
 }
 
+/// `with-defaults` mode ([RFC6243](https://www.rfc-editor.org/rfc/rfc6243.html)).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WithDefaultsValue {
@@ -328,6 +356,7 @@ impl FromStr for WithDefaultsValue {
     }
 }
 
+/// Source datastore of `<get-config>` / `<validate>` / `<copy-config>`.
 #[derive(Debug, Serialize)]
 pub struct Source {
     #[serde(rename = "$value")]
@@ -341,6 +370,7 @@ pub struct Target {
     pub datastore: Datastore,
 }
 
+/// Configuration datastore ([RFC6241 5.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-5.1)).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Datastore {
@@ -602,6 +632,7 @@ pub struct CancelCommit {
     persist_id: Option<String>,
 }
 
+/// Subtree filter for `<get>` / `<get-config>` ([RFC6241 6](https://www.rfc-editor.org/rfc/rfc6241.html#section-6)).
 #[derive(Debug, Serialize)]
 pub struct Filter {
     #[serde(rename = "@type")]
@@ -611,6 +642,9 @@ pub struct Filter {
 }
 
 impl Filter {
+    /// Build a subtree filter from XML.
+    ///
+    /// `\"` escape sequences are unescaped so shell-quoted snippets work.
     pub fn subtree(filter: &str) -> Filter {
         let filter = Filter::strip_slashes(filter).unwrap();
         Filter {
@@ -634,6 +668,7 @@ impl Filter {
     }
 }
 
+/// `<rpc-reply>` ([RFC6241 4.2](https://www.rfc-editor.org/rfc/rfc6241.html#section-4.2)).
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", rename(serialize = "rpc-reply"))]
 pub struct RpcReply {
@@ -646,14 +681,17 @@ pub struct RpcReply {
 }
 
 impl RpcReply {
+    /// True when the reply has `<ok>` and no `<rpc-error>`.
     pub fn is_ok(&self) -> bool {
         self.ok.is_some() && self.rpc_error.is_none()
     }
 
+    /// True when the reply contains at least one `<rpc-error>`.
     pub fn has_errors(&self) -> bool {
         self.rpc_error.is_some()
     }
 
+    /// `message-id` echoed from the request.
     pub fn get_message_id(&self) -> &str {
         &self.message_id
     }
@@ -672,6 +710,7 @@ impl Display for RpcReply {
 
 impl std::error::Error for RpcReply {}
 
+/// One `<rpc-error>` from a reply ([RFC6241 4.3](https://www.rfc-editor.org/rfc/rfc6241.html#section-4.3)).
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename = "rpc-error", rename_all = "kebab-case")]
 pub struct Error {
@@ -748,6 +787,7 @@ struct ErrorInfo {
     session_id: Option<u64>,
 }
 
+/// `<create-subscription>` body ([RFC5277 2.1.1](https://www.rfc-editor.org/rfc/rfc5277.html#section-2.1.1)).
 #[derive(Debug, Serialize)]
 pub struct CreateSubscription {
     #[serde(rename = "@xmlns")]

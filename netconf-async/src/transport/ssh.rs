@@ -1,3 +1,5 @@
+//! SSH transport that requests the `netconf` subsystem ([RFC6242](https://www.rfc-editor.org/rfc/rfc6242.html)).
+
 use crate::error::{NetconfClientError, NetconfClientResult};
 use crate::framer::Framer;
 use crate::framer::async_framer::AsyncFramer;
@@ -7,18 +9,28 @@ use async_trait::async_trait;
 use std::io;
 use tokio::net::TcpStream;
 
+/// NETCONF-over-SSH session on a Tokio [`TcpStream`].
+///
+/// Default NETCONF port is **830**; the caller puts it in `addr`.
 pub struct SSHTransport {
     session: AsyncSession<TcpStream>,
     framer: AsyncFramer<AsyncChannel<TcpStream>>,
 }
 
 impl SSHTransport {
+    /// Wrap an already-authenticated [`AsyncSession`] and request subsystem `netconf`.
+    ///
+    /// Use this for ssh-agent or public-key auth; build and authenticate the
+    /// session yourself, then hand it over.
     pub async fn new_with_session(
         session: AsyncSession<TcpStream>,
     ) -> NetconfClientResult<SSHTransport> {
         connect_internal(session).await
     }
 
+    /// TCP connect, password-authenticate, request subsystem `netconf`.
+    ///
+    /// `addr` is `host:port`, e.g. `192.0.2.10:830`.
     pub async fn new_with_user_auth(
         addr: &str,
         user_name: &str,

@@ -1,3 +1,5 @@
+//! NETCONF session: hello exchange, typed RPCs, and teardown.
+
 use crate::NETCONF_BASE_11_CAP;
 use crate::error::{NetconfClientError, NetconfClientResult};
 use crate::message::{
@@ -17,6 +19,10 @@ use tokio::task::block_in_place;
 #[cfg(feature = "tokio")]
 use tokio::{select, signal};
 
+/// Active NETCONF session on top of a [`Transport`].
+///
+/// Constructed via [`Connection::new`], which exchanges `<hello>` and upgrades
+/// to 1.1 framing when the server advertises [`crate::NETCONF_BASE_11_CAP`].
 pub struct Connection {
     pub(crate) transport: Box<dyn Transport + Send + 'static>,
 
@@ -27,6 +33,8 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Open a session: send client `<hello>`, parse the server hello, upgrade
+    /// the framer if the server advertised `:base:1.1`.
     pub async fn new<T>(transport: T) -> NetconfClientResult<Connection>
     where
         T: Transport + 'static,
@@ -42,10 +50,14 @@ impl Connection {
         Ok(conn)
     }
 
+    /// Skip `<rpc-reply>` parse and return the raw XML from the device.
+    ///
+    /// `<rpc-error>` is then *not* turned into [`NetconfClientError::Netconf`].
     pub fn set_skip_serializing(&mut self) {
         self.skip_serializing = true
     }
 
+    /// Server-assigned session-id from `<hello>`, or `0` if the server omitted it.
     pub fn session_id(&self) -> u64 {
         self.session_id.unwrap_or(0)
     }
@@ -90,6 +102,7 @@ impl Connection {
         self.run_rpc(get_config).await
     }
 
+    /// `<get>` operational state ([RFC6241 7.7](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.7)).
     pub async fn get(
         &mut self,
         filter: Option<Filter>,
@@ -99,6 +112,7 @@ impl Connection {
         self.run_rpc(get_config).await
     }
 
+    /// `<validate>` ([RFC6241 8.6.4.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-8.6.4.1)).
     pub async fn validate(&mut self, datastore: Datastore) -> NetconfClientResult<String> {
         let validate = Rpc::new_with_operation(RpcOperation::Validate {
             source: Source { datastore },
@@ -163,11 +177,15 @@ impl Connection {
         self.run_rpc(rpc).await
     }
 
+    /// `<commit>` of the candidate datastore ([RFC6241 8.3.4.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-8.3.4.1)).
     pub async fn commit(&mut self) -> NetconfClientResult<String> {
         let commit = Rpc::new_with_operation(RpcOperation::new_commit(None, None, None, None));
         self.run_rpc(commit).await
     }
 
+    /// Confirmed `<commit>` ([RFC6241 8.4](https://www.rfc-editor.org/rfc/rfc6241.html#section-8.4)).
+    ///
+    /// `persist` lets another session confirm later via [`Self::confirm_commit`].
     pub async fn confirmed_commit(
         &mut self,
         confirm_timeout: Option<i32>,
@@ -209,6 +227,9 @@ impl Connection {
         self.run_rpc(rpc).await
     }
 
+    /// `<close-session>` ([RFC6241 7.8](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.8)).
+    ///
+    /// Marks the session closed so [`Drop`] does not send another close.
     pub async fn close_session(&mut self) -> NetconfClientResult<String> {
         let close_session = Rpc::new_with_operation(RpcOperation::CloseSession);
         self.is_closed = true;
