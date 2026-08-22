@@ -2,7 +2,7 @@
 name = "netconf-async"
 version = "0.1.0"
 edition = "2024"
-authors = ["Lauri Huotari <flatlate@gmail.com>"]
+authors = ["Lauri Huotari <65590793+Mrflatt@users.noreply.github.com>"]
 description = "A Rust NETCONF library"
 license = "MIT"
 repository = "https://github.com/Mrflatt/netconf-rust"

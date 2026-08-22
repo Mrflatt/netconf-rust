@@ -2,7 +2,7 @@
 name = "netconf-cli"
 version = "0.1.0"
 edition = "2024"
-authors = ["Lauri Huotari <flatlate@gmail.com>"]
+authors = ["Lauri Huotari <65590793+Mrflatt@users.noreply.github.com>"]
 description = "Netconf cli tool written in Rust"
 
 [features]
@@ -34,6 +34,7 @@ ssh2-config = "0.7"
 tar = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+uuid = { version = "1", features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
 wiremock = "0.6"

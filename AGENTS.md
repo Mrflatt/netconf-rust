@@ -37,9 +37,10 @@ Tests live next to the code they cover, under `#[cfg(test)]`. There is no `tests
 | `netconf-async` | `src/framer/async_framer.rs` | 1.0 EOM + 1.1 chunked framing (`#[tokio::test]`) |
 | `netconf-cli` | `src/cli.rs` | `cli().debug_assert()` |
 | `netconf-cli` | `src/config.rs` | ProxyJump / host:port / ssh_config parsing |
+| `netconf-cli` | `src/commands/builtin.rs` | XML file/dir load (`1-rpc.xml` name order) |
 | `netconf-cli` | `src/update.rs` | tag parse, asset match, GitHub digest, archive extract, poller |
 
-- Add a test for every new RPC variant, framer edge, or host-string parse.
+- Add a test for every new RPC variant, framer edge, host-string parse, or XML file/dir loader.
 - XML tests pin a fixed `message-id` and compare the full document with `pretty_assertions::assert_eq`.
 - Do not add live-device tests. CI sets `CARGO_PUBLIC_NETWORK_TESTS=1` but nothing reads it.
 - A failing test is a bug. Fix it; never delete or `#[ignore]` it to go green.
@@ -77,16 +78,21 @@ cargo test -p netconf-async test_deserialize_rpc_reply -- --nocapture
         ├── config.rs          # ~/.ssh/config, ProxyJump, Host
         ├── update.rs          # GitHub release poller + self-replace
         └── commands/
-            ├── builtin.rs     # dispatch + filter file helper
+            ├── builtin.rs     # dispatch + filter/xml file-or-dir helper
             ├── get.rs
             ├── get_config.rs
+            ├── edit.rs
+            ├── copy.rs
+            ├── commit.rs
+            ├── rpc.rs
             ├── notification.rs
             └── update.rs      # update subcommand (no device session)
 ```
 
-Implemented `Connection` RPCs: `get`, `get-config`, `validate`, `commit`, `confirmed_commit`, `close_session`, `kill_session`, `notification` (`<create-subscription>`, RFC 5277).
+Implemented `Connection` RPCs: `get`, `get-config`, `edit_config`, `copy_config`, `delete_config`, `lock`, `unlock`, `validate`, `commit`, `confirmed_commit`, `confirm_commit`, `cancel_commit`, `discard_changes`, `close_session`, `kill_session`, `raw_rpc`, `notification` (`<create-subscription>`, RFC 5277).
 
-Implemented CLI subcommands: `get`, `get-config`, `notification`, `update`. The help template also lists `edit`, `copy`, `rpc` — those are **not** implemented. Do not document them as working. Do not add them unless asked.
+Implemented CLI subcommands: `get`, `get-config`, `edit`, `copy`, `commit`, `rpc`, `notification`, `update`.
+`edit` orchestrates lock → edit-config (all `--file` XML, name order) → validate → commit once → unlock → optional running→startup copy. `rpc` executes each `--file` XML in name order. `commit` confirms or cancels a persist confirmed-commit. `update` polls GitHub releases and does not open a device session.
 
 ## Stack
 
@@ -169,7 +175,7 @@ pub async fn get_config(&mut self, ds: &str, f: Option<String>) -> Result<String
 - Never edit `target/`. Never hand-edit `Cargo.lock` except via `cargo` when changing deps.
 - Never disable rustfmt, clippy, or hooks. Never add `#[allow]` to silence a real warning you introduced.
 - `netconf-async/src/transport/tls.rs` is a zero-byte stub and is **not** `mod`ed. Do not `pub mod tls` or pretend TLS works.
-- Do not implement `edit` / `copy` / `rpc` CLI commands, TLS transport, or multi-hop ProxyJump unless asked. CLI ProxyJump supports **one** hop; jump auth is ssh-agent only (device password is not reused).
+- Do not implement TLS transport, standalone lock/unlock/delete CLI commands, or multi-hop ProxyJump unless asked. CLI ProxyJump supports **one** hop; jump auth is ssh-agent only (device password is not reused).
 - Do not bump crate versions or publish. release-please opens the release PR and tags on merge.
 - Do not rewrite working serialize/framer tests to “simplify” them.
 - Filter files are subtree XML. `Filter::subtree` unescapes `\"` sequences; keep that behavior.

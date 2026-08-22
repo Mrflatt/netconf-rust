@@ -1097,6 +1097,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "uuid",
  "wiremock",
 ]
 
