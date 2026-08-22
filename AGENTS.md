@@ -63,7 +63,7 @@ cargo test -p netconf-async test_deserialize_rpc_reply -- --nocapture
 ├── netconf-async/             # library crate
 │   └── src/
 │       ├── lib.rs             # re-exports + NETCONF URN constants
-│       ├── connection.rs      # session: hello, RPCs, notifications, Drop
+│       ├── connection.rs      # session: hello, RPCs, timeouts, notifications
 │       ├── message.rs         # Hello / Rpc / RpcReply / Filter / Datastore
 │       ├── error.rs           # NetconfClientError + NetconfClientResult
 │       ├── framer.rs          # Framer trait, ]]>]]> terminator
@@ -96,9 +96,9 @@ Implemented CLI subcommands: `get`, `get-config`, `edit`, `copy`, `commit`, `rpc
 
 ## Stack
 
-- Rust **edition 2024**, workspace resolver **3**. Needs rustc **1.85+**. No `rust-version` pin; CI uses current stable.
+- Rust **edition 2024**, workspace resolver **3**. `rust-version = "1.85"` on `netconf-async`; CI uses current stable.
 - Tokio 1 (multi-thread). Traits use `async-trait`.
-- XML via `quick-xml` + `serde` / `serde_derive`.
+- XML via `quick-xml` + `serde` (derive feature). Substring search via `memchr`.
 - SSH: `async-ssh2-lite` (tokio) in the library; CLI also uses `ssh2` + `ssh2-config`.
 - Errors: `thiserror` → `NetconfClientError`, alias `NetconfClientResult<T>`.
 - CLI: clap 4 builder API (not derive on command structs), `env_logger`, `color-print`.
@@ -107,11 +107,14 @@ Library features (`netconf-async`):
 
 | Feature | Default | Notes |
 |---|---|---|
-| `tokio` | yes | Connection Drop, notifications |
-| `async-ssh2-lite` | yes | `transport::ssh` |
-| `async-trait` | yes | `Transport` / `Framer` |
+| `ssh` | yes | `transport::ssh`; implies `tokio` |
+| `tokio` | yes | `AsyncFramer`, RPC timeouts, notifications |
 | `vendored-openssl` | no | forwarded to `async-ssh2-lite` |
 | `openssl-on-win32` | no | Windows CI |
+
+`async-trait` is a plain dependency: the `Transport` and `Framer` traits need it
+unconditionally, so it must not be optional. Every feature combination has to
+build — check with `cargo check --no-default-features --features ...`.
 
 Crate-level rustdoc lives in `netconf-async/src/lib.rs`; crates.io renders `netconf-async/README.md`. Do not hardcode a crate version that does not match `Cargo.toml`.
 
@@ -123,9 +126,16 @@ Session flow:
 2. Exchange `<hello>` with **1.0** framing (`]]>]]>`).
 3. If the server advertises `urn:ietf:params:netconf:base:1.1`, call `transport.upgrade()` → chunked framing (`\n#N\n...\n##\n`, RFC 6242).
 4. Each RPC is `write_and_receive`. Reply is parsed as `RpcReply`; any `<rpc-error>` becomes `NetconfClientError::Netconf`.
-5. `close_session` sets `is_closed`. `Drop` (tokio feature) also closes unless `is_closed`.
+5. `close_session` sends the RPC and then closes the transport. `Drop` cannot await I/O, so it only warns when the session is still open.
 
-`Connection::set_skip_serializing` skips reply parse and returns raw XML.
+`Connection::set_parse_replies(false)` skips the reply parse and returns raw XML.
+`Connection::set_timeout` bounds one RPC; on timeout the session is marked
+desynchronized, because a late reply would be read as the next answer.
+
+Replies are parsed through `message::from_xml`, which retries with namespace
+prefixes stripped so `<nc:hello>` / `<nc:rpc-reply>` devices still work.
+`ErrorTag` / `ErrorType` / `ErrorSeverity` keep unknown values in an `Other`
+variant rather than failing the whole parse.
 
 Default NETCONF-over-SSH port is **830**. Jump hosts use **22**.
 
@@ -174,8 +184,9 @@ pub async fn get_config(&mut self, ds: &str, f: Option<String>) -> Result<String
 - Never commit secrets, device passwords, or `*.local.sh`. CLI password flag is `--password` / `NETCONF_PASSWORD`.
 - Never edit `target/`. Never hand-edit `Cargo.lock` except via `cargo` when changing deps.
 - Never disable rustfmt, clippy, or hooks. Never add `#[allow]` to silence a real warning you introduced.
-- `netconf-async/src/transport/tls.rs` is a zero-byte stub and is **not** `mod`ed. Do not `pub mod tls` or pretend TLS works.
+- There is no TLS transport. Do not add `transport/tls.rs` or pretend TLS works.
 - Do not implement TLS transport, standalone lock/unlock/delete CLI commands, or multi-hop ProxyJump unless asked. CLI ProxyJump supports **one** hop; jump auth is ssh-agent only (device password is not reused).
 - Do not bump crate versions or publish. release-please opens the release PR and tags on merge.
 - Do not rewrite working serialize/framer tests to “simplify” them.
-- Filter files are subtree XML. `Filter::subtree` unescapes `\"` sequences; keep that behavior.
+- Filter files are subtree XML. `Filter::subtree` is infallible and passes the XML through verbatim; it must never panic on caller input.
+- Caller XML (`<config>`, `<filter>`) is spliced in after serialization via a placeholder, so it reaches the device byte for byte while `<url>` and friends stay escaped. Do not "simplify" this by unescaping the whole document.

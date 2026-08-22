@@ -53,8 +53,9 @@ async fn main() -> netconf_async::error::NetconfClientResult<()> {
 ```
 
 `Connection::new` performs the `<hello>` exchange and upgrades the framer when
-the server advertises `urn:ietf:params:netconf:base:1.1`. If you skip
-`close_session`, `Drop` tries to close the session.
+the server advertises `urn:ietf:params:netconf:base:1.1`. Call `close_session`
+when you are done: a clean shutdown has to await I/O, which `Drop` cannot do, so
+dropping an open session only logs a warning.
 
 Password auth is the short path. For ssh-agent or key files, build an
 `async_ssh2_lite::AsyncSession`, authenticate it, then wrap it with
@@ -71,10 +72,12 @@ and is passed to `Connection::new` the same way.
    framing (`\n#N\n...\n##\n`, [RFC 6242](https://www.rfc-editor.org/rfc/rfc6242.html)).
 4. Each RPC is `write_and_receive`. The reply is parsed as `RpcReply`; any
    `<rpc-error>` becomes `NetconfClientError::Netconf`.
-5. `close_session` sets `is_closed`. `Drop` (tokio feature) also closes unless
-   already closed.
+5. `close_session` ends the session and tears the transport down.
 
-`Connection::set_skip_serializing` skips reply parse and returns the raw XML.
+`Connection::set_parse_replies(false)` returns the device's XML untouched and
+stops `<rpc-error>` from becoming an error. `Connection::set_timeout` bounds a
+single RPC; a timed-out session is marked unusable, because a late reply would
+be read as the answer to the next request.
 
 Default NETCONF-over-SSH port is **830**.
 
@@ -99,15 +102,16 @@ Subtree filters and `with-defaults` ([RFC 6243](https://www.rfc-editor.org/rfc/r
 are supported on `get` / `get-config`. `has_capability` reflects the server
 `<hello>` (query string ignored).
 
-`Filter::subtree` unescapes `\"` sequences so shell-quoted snippets work.
+Filter and `<config>` payloads reach the device byte for byte; everything the
+crate generates around them stays XML-escaped. `RpcReply::errors()` exposes each
+`<rpc-error>`, including vendor tags outside RFC 6241.
 
 ## Crate features
 
 | Feature | Default | Purpose |
 |---|---|---|
-| `tokio` | yes | runtime integration, notifications, `Drop` |
-| `async-ssh2-lite` | yes | `SSHTransport` |
-| `async-trait` | yes | `Transport` / `Framer` traits |
+| `ssh` | yes | `SSHTransport` over `async-ssh2-lite` (implies `tokio`) |
+| `tokio` | yes | Tokio framer, RPC timeouts, notification streams |
 | `vendored-openssl` | no | static OpenSSL |
 | `openssl-on-win32` | no | OpenSSL instead of WinCNG on Windows |
 

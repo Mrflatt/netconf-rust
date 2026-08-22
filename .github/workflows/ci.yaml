@@ -57,6 +57,40 @@ jobs:
       - name: Check netconf-cli lockfile
         run: cargo update -p netconf-cli --locked
 
+  # Default builds pull tokio/io-util in transitively, so a broken feature gate
+  # only shows up once someone opts out of a default feature.
+  feature-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Update rust
+        run: rustup update stable && rustup default stable
+      - name: Check every feature combination
+        run: |
+          set -euo pipefail
+          for features in "" "tokio" "ssh" "tokio,ssh"; do
+            echo "::group::netconf-async --no-default-features --features '$features'"
+            cargo check -p netconf-async --no-default-features --features "$features"
+            echo "::endgroup::"
+          done
+          cargo check -p netconf-async --all-targets
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install the declared MSRV
+        run: |
+          msrv=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["rust_version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="netconf-async"))')
+          echo "Declared MSRV: $msrv"
+          rustup toolchain install "$msrv" --no-self-update
+          rustup default "$msrv"
+      - name: Build netconf-async on the MSRV
+        run: cargo build -p netconf-async
+
   test:
     if: ${{ github.actor != 'github-actions[bot]' || !contains(github.event.pull_request.title, 'release') }}
     runs-on: ${{ matrix.os }}
@@ -123,6 +157,8 @@ jobs:
       - rustfmt
       - clippy
       - lockfile
+      - feature-matrix
+      - msrv
       - test
     outputs:
       cli_release: ${{ steps.release.outputs['netconf-cli--release_created'] }}
