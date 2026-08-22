@@ -37,7 +37,7 @@ pub fn cli() -> Command {
             ),
             arg(
                 "file",
-                "File or directory of config XML (applied in name order, then committed once)",
+                "Config XML, file or directory, @path, or '-' for stdin (name order, committed once)",
                 false,
                 Some('f'),
                 None,
@@ -137,7 +137,7 @@ async fn run(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
     let files = if url.is_some() {
         Vec::new()
     } else {
-        let files = xml_inputs_from_args("file", &cfg.args)?;
+        let files = xml_inputs_from_args("file", cfg)?;
         if files.is_empty() {
             return Err(NetconfClientError::new(
                 "config file/directory or url required".to_string(),

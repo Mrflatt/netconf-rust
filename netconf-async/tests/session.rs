@@ -492,7 +492,7 @@ async fn notifications_stop_when_the_receiver_is_dropped() {
         first
     });
 
-    conn.notification(tx, Some("NETCONF"), None, None)
+    conn.notification(tx, Some("NETCONF"), None, None, None)
         .await
         .unwrap();
     assert!(received.await.unwrap().unwrap().contains("eventTime"));

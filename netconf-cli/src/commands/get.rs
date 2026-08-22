@@ -20,7 +20,7 @@ pub fn cli() -> Command {
         ))
         .args([
             Arg::new("filter")
-                .help("File containing filters (Required, use get-config without filter)")
+                .help("Subtree filter XML, file path, @file, or '-' for stdin (required; use get-config without filter)")
                 .short('f')
                 .long("filter")
                 .required(true)
@@ -36,14 +36,15 @@ pub fn cli() -> Command {
 pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
     let with_defaults = value_of_if_exists::<String>("defaults", &cfg.args)
         .map(|value| WithDefaultsValue::from_str(value).unwrap());
-    let filter = filter_from_args(&cfg.args)?;
+    let filter = filter_from_args(cfg)?;
     match conn.get(filter, with_defaults).await {
         Ok(resp) => {
             info!("Response:\n{}", resp);
+            Ok(())
         }
         Err(err) => {
             error!("Get error: {}", err);
+            Err(err)
         }
-    };
-    Ok(())
+    }
 }

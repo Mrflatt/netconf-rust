@@ -10,11 +10,16 @@ use netconf_async::connection::Connection;
 use netconf_async::error::{NetconfClientError, NetconfClientResult};
 use netconf_async::transport::ssh::SSHTransport;
 use ssh2_config::{DefaultAlgorithms, HostParams};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
 
 pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
     let hosts = &cfg.inner.addresses;
+    let sem = cfg
+        .inner
+        .parallel
+        .map(|limit| Arc::new(tokio::sync::Semaphore::new(limit)));
     let mut futures = FuturesUnordered::new();
     for addr in hosts {
         let params = if let Some(ssh_config) = &cfg.inner.ssh_config {
@@ -34,9 +39,19 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
         let start_time = Instant::now();
         let cmd_clone = cmd.clone();
         let cfg_clone = cfg.clone();
+        let sem = sem.clone();
         let handle: JoinHandle<NetconfClientResult<()>> = tokio::spawn(async move {
+            let _permit = match sem {
+                Some(sem) => Some(sem.acquire_owned().await.map_err(|err| {
+                    NetconfClientError::new(format!("failed to acquire host slot: {err}"))
+                })?),
+                None => None,
+            };
             let ssh_transport = SSHTransport::connect(host.ssh_transport_config()?).await?;
             let mut connection = Connection::new(ssh_transport).await?;
+            if let Some(timeout) = cfg_clone.inner.timeout {
+                connection.set_timeout(Some(timeout));
+            }
             info!(target: &host.address, "Connected to host");
             debug!(
                 target: &host.address,
@@ -48,10 +63,7 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
 
             if let Some(result) = builtin_exec(&cmd_clone, &mut connection, &cfg_clone.inner).await
             {
-                match result {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(e),
-                }
+                result
             } else {
                 Err(NetconfClientError::new("Unknown command"))
             }?;
@@ -63,19 +75,28 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
         futures.push(handle);
     }
 
+    let mut first_err = None;
     while let Some(handle) = futures.next().await {
         match handle {
-            Ok(result) => {
-                if let Err(err) = result {
-                    error!("Task failed with error: {}", err);
-                } else {
-                    debug!("Task completed successfully")
+            Ok(Ok(())) => debug!("Task completed successfully"),
+            Ok(Err(err)) => {
+                error!("Task failed with error: {}", err);
+                if first_err.is_none() {
+                    first_err = Some(err);
                 }
             }
-            Err(err) => error!("Task failed: {}", err),
+            Err(err) => {
+                error!("Task failed: {}", err);
+                if first_err.is_none() {
+                    first_err = Some(NetconfClientError::new(format!("Task failed: {err}")));
+                }
+            }
         }
     }
-    Ok(())
+    match first_err {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 pub fn cli() -> Command {
@@ -115,15 +136,25 @@ See '<cyan,bold>netconf help</> <cyan><<command>></>' for more information on a 
                 .global(true),
             arg!(-q --quiet "Disable logging completely")
                 .global(true),
-            global_opt("host", "Username for netconf connection")
+            global_opt("host", "NETCONF host (repeat or comma-separate for fan-out)")
                 .env("NETCONF_HOST")
                 .action(ArgAction::Append)
                 .value_delimiter(','),
-            global_opt("username", "Username for netconf connection")
+            global_opt("username", "Username for NETCONF connection")
                 .env("NETCONF_USERNAME"),
-            global_opt("password", "Username for netconf connection")
+            global_opt("password", "Password for NETCONF connection")
                 .env("NETCONF_PASSWORD")
                 .hide_env(true),
+            Arg::new("timeout")
+                .long("timeout")
+                .help("Per-RPC timeout in seconds")
+                .value_parser(clap::value_parser!(u64).range(1..))
+                .global(true),
+            Arg::new("parallel")
+                .long("parallel")
+                .help("Max concurrent hosts (default: all)")
+                .value_parser(clap::value_parser!(u64).range(1..))
+                .global(true),
             Arg::new("strict-host-key-checking")
                 .long("strict-host-key-checking")
                 .help("Host-key check: accept-new (default), yes, or no")
@@ -143,4 +174,27 @@ fn global_opt(name: &'static str, help: &'static str) -> Arg {
 #[test]
 fn verify_cli() {
     cli().debug_assert();
+}
+
+#[test]
+fn timeout_and_parallel_flags() {
+    use crate::config::CliConfig;
+    use std::time::Duration;
+
+    let mut matches = cli()
+        .try_get_matches_from([
+            "netconf",
+            "--host",
+            "192.0.2.10",
+            "--timeout",
+            "15",
+            "--parallel",
+            "3",
+            "get-config",
+        ])
+        .unwrap();
+    let (_, args) = matches.remove_subcommand().unwrap();
+    let cfg = CliConfig::new(args).unwrap();
+    assert_eq!(cfg.inner.timeout, Some(Duration::from_secs(15)));
+    assert_eq!(cfg.inner.parallel, Some(3));
 }

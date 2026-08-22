@@ -30,7 +30,7 @@ pub fn cli() -> Command {
             ),
             arg(
                 "filter",
-                "File containing filters",
+                "Subtree filter XML, file path, @file, or '-' for stdin",
                 false,
                 Some('f'),
                 None,
@@ -55,14 +55,15 @@ pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()
     let with_defaults = value_of_if_exists::<String>("with-defaults", &cfg.args)
         .map(|value| WithDefaultsValue::from_str(value).unwrap());
     let source = Datastore::from_str(source)?;
-    let filter = filter_from_args(&cfg.args)?;
+    let filter = filter_from_args(cfg)?;
     match conn.get_config(source, filter, with_defaults).await {
         Ok(resp) => {
             info!("Response:\n{}", resp);
+            Ok(())
         }
         Err(err) => {
             error!("Get error: {}", err);
+            Err(err)
         }
-    };
-    Ok(())
+    }
 }

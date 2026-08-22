@@ -335,6 +335,9 @@ impl Connection {
     /// Forwards notifications to `sender` until the device closes the stream or
     /// the receiver is dropped. The returned future is cancel-safe to drop, so
     /// wire up shutdown with `tokio::select!` in the calling application.
+    ///
+    /// `start_time` / `stop_time` are RFC 3339 replay bounds ([RFC5277 2.1.1](https://www.rfc-editor.org/rfc/rfc5277.html#section-2.1.1)).
+    /// `stop_time` requires `start_time`.
     #[cfg(feature = "tokio")]
     #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
     pub async fn notification(
@@ -342,11 +345,16 @@ impl Connection {
         sender: Sender<String>,
         stream: Option<&str>,
         filter: Option<Filter>,
-        duration: Option<Duration>,
+        start_time: Option<&str>,
+        stop_time: Option<&str>,
     ) -> NetconfClientResult<()> {
+        let start_time = start_time
+            .map(crate::message::parse_date_time)
+            .transpose()?;
+        let stop_time = stop_time.map(crate::message::parse_date_time).transpose()?;
         let notification = Rpc::new_with_operation(RpcOperation::new_create_subscription(
-            stream, filter, duration,
-        ));
+            stream, filter, start_time, stop_time,
+        )?);
         self.run_rpc(notification).await?;
         self.run_notification_loop(sender).await
     }

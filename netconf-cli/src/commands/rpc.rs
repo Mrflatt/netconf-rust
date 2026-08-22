@@ -18,7 +18,7 @@ pub fn cli() -> Command {
         ))
         .args([arg(
             "file",
-            "File or directory of complete <rpc> documents (executed in name order)",
+            "RPC XML, file or directory, @path, or '-' for stdin (executed in name order)",
             true,
             Some('f'),
             None,
@@ -38,7 +38,7 @@ pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()
 }
 
 async fn run(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
-    let files = xml_inputs_from_args("file", &cfg.args)?;
+    let files = xml_inputs_from_args("file", cfg)?;
     if files.is_empty() {
         return Err(NetconfClientError::new("rpc file required".to_string()));
     }

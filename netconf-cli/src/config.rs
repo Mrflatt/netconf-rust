@@ -11,6 +11,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct CliConfig {
@@ -25,13 +26,14 @@ pub struct Config {
     pub password: Option<String>,
     pub addresses: Vec<String>,
     pub strict_host_key: Option<HostKeyCheck>,
+    pub timeout: Option<Duration>,
+    pub parallel: Option<usize>,
+    pub stdin_xml: Option<String>,
 }
 
 impl CliConfig {
     pub fn new(args: ArgMatches) -> NetconfClientResult<Self> {
-        let mut ssh_dir = home_dir().unwrap_or(PathBuf::from("/"));
-        ssh_dir.extend(Path::new(".ssh/config"));
-        let ssh_config = read_ssh_config(&ssh_dir);
+        let ssh_config = load_ssh_config();
         let hosts = values_of::<String>("host", &args)
             .iter()
             .map(|h| h.to_string())
@@ -40,6 +42,10 @@ impl CliConfig {
         let password = value_of_if_exists::<String>("password", &args).cloned();
         let strict_host_key = value_of_if_exists::<String>("strict-host-key-checking", &args)
             .and_then(|value| parse_host_key_check(value));
+        let timeout =
+            value_of_if_exists::<u64>("timeout", &args).map(|&secs| Duration::from_secs(secs));
+        let parallel = value_of_if_exists::<u64>("parallel", &args).map(|&n| n as usize);
+        let stdin_xml = capture_stdin_xml(&args)?;
         Ok(Self {
             inner: Arc::new(Config {
                 username,
@@ -48,20 +54,73 @@ impl CliConfig {
                 args,
                 ssh_config,
                 strict_host_key,
+                timeout,
+                parallel,
+                stdin_xml,
             }),
         })
     }
 }
 
-fn read_ssh_config(dir: &Path) -> Option<SshConfig> {
-    debug!("Trying to parse ssh configuration '{}'", dir.display());
+const SYSTEM_SSH_CONFIG: &str = "/etc/ssh/ssh_config";
 
-    let mut reader = match File::open(dir) {
+fn user_ssh_config_path() -> PathBuf {
+    let mut path = home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    path.push(".ssh/config");
+    path
+}
+
+fn load_ssh_config() -> Option<SshConfig> {
+    merge_ssh_configs(
+        read_ssh_config(&user_ssh_config_path()),
+        read_ssh_config(Path::new(SYSTEM_SSH_CONFIG)),
+    )
+}
+
+fn merge_ssh_configs(
+    preferred: Option<SshConfig>,
+    fallback: Option<SshConfig>,
+) -> Option<SshConfig> {
+    match (preferred, fallback) {
+        (None, None) => None,
+        (Some(config), None) | (None, Some(config)) => Some(config),
+        (Some(preferred), Some(fallback)) => {
+            let mut hosts = preferred.get_hosts().clone();
+            hosts.extend(fallback.get_hosts().iter().cloned());
+            Some(SshConfig::from_hosts(hosts))
+        }
+    }
+}
+
+fn capture_stdin_xml(args: &ArgMatches) -> NetconfClientResult<Option<String>> {
+    let needs_stdin = ["filter", "file"].iter().any(|name| {
+        args.try_get_one::<String>(name)
+            .ok()
+            .flatten()
+            .is_some_and(|value| value == "-")
+    });
+    if !needs_stdin {
+        return Ok(None);
+    }
+    let mut content = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut content)
+        .map_err(|err| NetconfClientError::new(format!("failed to read stdin: {err}")))?;
+    Ok(Some(content))
+}
+
+fn read_ssh_config(path: &Path) -> Option<SshConfig> {
+    debug!("Trying to parse ssh configuration '{}'", path.display());
+
+    let mut reader = match File::open(path) {
         Ok(f) => BufReader::new(f),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            debug!("No ssh config at '{}'", path.display());
+            return None;
+        }
         Err(err) => {
             warn!(
                 "Could not open ssh config file '{}', error: {}",
-                dir.display(),
+                path.display(),
                 err
             );
             return None;
@@ -72,11 +131,15 @@ fn read_ssh_config(dir: &Path) -> Option<SshConfig> {
         ParseRule::ALLOW_UNKNOWN_FIELDS | ParseRule::ALLOW_UNSUPPORTED_FIELDS,
     ) {
         Ok(config) => {
-            debug!("Successfully parsed configuration");
+            debug!("Successfully parsed configuration {}", path.display());
             Some(config)
         }
         Err(err) => {
-            error!("Failed to parse ssh configuration, error '{}'", err);
+            error!(
+                "Failed to parse ssh configuration '{}', error '{}'",
+                path.display(),
+                err
+            );
             None
         }
     }
@@ -843,5 +906,38 @@ mod tests {
         let expanded = expand_tilde(Path::new("~/.ssh/id_ed25519"));
         assert!(!expanded.starts_with("~"), "{expanded:?}");
         assert!(expanded.ends_with(".ssh/id_ed25519"), "{expanded:?}");
+    }
+
+    #[test]
+    fn merge_ssh_configs_user_wins_system_fills_gaps() {
+        let user = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new("Host foo\n  User alice\n"),
+                ParseRule::STRICT,
+            )
+            .unwrap();
+        let system = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new("Host foo\n  User bob\n  Port 2222\n"),
+                ParseRule::STRICT,
+            )
+            .unwrap();
+
+        let merged = merge_ssh_configs(Some(user), Some(system)).unwrap();
+        let params = merged.query("foo");
+        assert_eq!(params.user.as_deref(), Some("alice"));
+        assert_eq!(params.port, Some(2222));
+    }
+
+    #[test]
+    fn merge_ssh_configs_falls_back_when_user_missing() {
+        let system = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new("Host *\n  User sysuser\n"),
+                ParseRule::STRICT,
+            )
+            .unwrap();
+        let merged = merge_ssh_configs(None, Some(system)).unwrap();
+        assert_eq!(merged.query("foo").user.as_deref(), Some("sysuser"));
     }
 }

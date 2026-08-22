@@ -82,20 +82,73 @@ pub(crate) fn xml_file_from_args(
     }
 }
 
-pub(crate) fn filter_from_args(args: &ArgMatches) -> NetconfClientResult<Option<Filter>> {
-    match xml_file_from_args("filter", args)? {
-        Some(content) => Ok(Some(Filter::subtree(&content))),
+#[derive(Debug, PartialEq, Eq)]
+enum XmlArgSource<'a> {
+    Inline(&'a str),
+    File(&'a str),
+    Stdin,
+}
+
+fn xml_arg_source(value: &str) -> XmlArgSource<'_> {
+    if value == "-" {
+        XmlArgSource::Stdin
+    } else if let Some(path) = value.strip_prefix('@') {
+        XmlArgSource::File(path)
+    } else if value.trim_start().starts_with('<') {
+        XmlArgSource::Inline(value)
+    } else {
+        XmlArgSource::File(value)
+    }
+}
+
+fn read_xml_arg(name: &str, value: &str, stdin: Option<&str>) -> NetconfClientResult<String> {
+    match xml_arg_source(value) {
+        XmlArgSource::Inline(xml) => Ok(xml.to_string()),
+        XmlArgSource::Stdin => stdin
+            .map(str::to_string)
+            .ok_or_else(|| NetconfClientError::new(format!("failed to read {name} from stdin"))),
+        XmlArgSource::File(path) => std::fs::read_to_string(path).map_err(|err| {
+            NetconfClientError::new(format!("failed to read {name} '{path}': {err}"))
+        }),
+    }
+}
+
+pub(crate) fn filter_from_args(cfg: &Config) -> NetconfClientResult<Option<Filter>> {
+    match value_of_if_exists::<String>("filter", &cfg.args) {
+        Some(value) => Ok(Some(Filter::subtree(&read_xml_arg(
+            "filter",
+            value,
+            cfg.stdin_xml.as_deref(),
+        )?))),
         None => Ok(None),
     }
 }
 
-pub(crate) fn xml_inputs_from_args(
-    name: &str,
-    args: &ArgMatches,
-) -> NetconfClientResult<Vec<XmlInput>> {
-    match value_of_if_exists::<String>(name, args) {
-        Some(path) => read_xml_inputs(path),
+pub(crate) fn xml_inputs_from_args(name: &str, cfg: &Config) -> NetconfClientResult<Vec<XmlInput>> {
+    match value_of_if_exists::<String>(name, &cfg.args) {
+        Some(value) => read_xml_arg_inputs(name, value, cfg.stdin_xml.as_deref()),
         None => Ok(Vec::new()),
+    }
+}
+
+fn read_xml_arg_inputs(
+    name: &str,
+    value: &str,
+    stdin: Option<&str>,
+) -> NetconfClientResult<Vec<XmlInput>> {
+    match xml_arg_source(value) {
+        XmlArgSource::Inline(xml) => Ok(vec![XmlInput {
+            name: "<inline>".to_string(),
+            content: xml.to_string(),
+        }]),
+        XmlArgSource::Stdin => {
+            let content = read_xml_arg(name, "-", stdin)?;
+            Ok(vec![XmlInput {
+                name: "-".to_string(),
+                content,
+            }])
+        }
+        XmlArgSource::File(path) => read_xml_inputs(path),
     }
 }
 
@@ -233,5 +286,79 @@ mod tests {
         let dir = TempDir::new();
         std::fs::write(dir.path().join("readme.txt"), "no xml").unwrap();
         assert!(read_xml_inputs(dir.path().to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn xml_arg_source_inline_file_at_and_stdin() {
+        assert_eq!(
+            xml_arg_source("<configure/>"),
+            XmlArgSource::Inline("<configure/>")
+        );
+        assert_eq!(
+            xml_arg_source("  </configure>"),
+            XmlArgSource::Inline("  </configure>")
+        );
+        assert_eq!(xml_arg_source("-"), XmlArgSource::Stdin);
+        assert_eq!(
+            xml_arg_source("filter.xml"),
+            XmlArgSource::File("filter.xml")
+        );
+        assert_eq!(
+            xml_arg_source("@filter.xml"),
+            XmlArgSource::File("filter.xml")
+        );
+        assert_eq!(xml_arg_source("@-"), XmlArgSource::File("-"));
+        assert_eq!(xml_arg_source("./<weird>"), XmlArgSource::File("./<weird>"));
+    }
+
+    #[test]
+    fn read_xml_arg_inline_and_file() {
+        let dir = TempDir::new();
+        let file = dir.path().join("filter.xml");
+        std::fs::write(&file, "<top/>").unwrap();
+        let path = file.to_str().unwrap();
+
+        assert_eq!(
+            read_xml_arg("filter", "<configure/>", None).unwrap(),
+            "<configure/>"
+        );
+        assert_eq!(read_xml_arg("filter", path, None).unwrap(), "<top/>");
+        assert_eq!(
+            read_xml_arg("filter", &format!("@{path}"), None).unwrap(),
+            "<top/>"
+        );
+        assert_eq!(
+            read_xml_arg("filter", "-", Some("<from-stdin/>")).unwrap(),
+            "<from-stdin/>"
+        );
+        let err = read_xml_arg("filter", "missing.xml", None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("failed to read filter 'missing.xml'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn read_xml_arg_inputs_inline_file_and_stdin() {
+        let dir = TempDir::new();
+        let file = dir.path().join("edit.xml");
+        std::fs::write(&file, "<config/>").unwrap();
+        let path = file.to_str().unwrap();
+
+        let inline = read_xml_arg_inputs("file", "<config/>", None).unwrap();
+        assert_eq!(inline.len(), 1);
+        assert_eq!(inline[0].name, "<inline>");
+        assert_eq!(inline[0].content, "<config/>");
+
+        let from_file = read_xml_arg_inputs("file", path, None).unwrap();
+        assert_eq!(from_file[0].content, "<config/>");
+
+        let from_at = read_xml_arg_inputs("file", &format!("@{path}"), None).unwrap();
+        assert_eq!(from_at[0].content, "<config/>");
+
+        let from_stdin = read_xml_arg_inputs("file", "-", Some("<piped/>")).unwrap();
+        assert_eq!(from_stdin[0].name, "-");
+        assert_eq!(from_stdin[0].content, "<piped/>");
     }
 }

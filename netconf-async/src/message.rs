@@ -3,13 +3,12 @@
 use crate::{NETCONF_URN, error};
 use core::fmt;
 use core::fmt::Display;
-use core::ops::Add;
 use core::str::FromStr;
-use core::time::Duration;
 use quick_xml::se::Serializer;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 /// Deserialize `xml`, retrying without namespace prefixes if the first pass fails.
@@ -326,24 +325,34 @@ impl RpcOperation {
     }
 
     /// `<create-subscription>` ([RFC5277 2.1.1](https://www.rfc-editor.org/rfc/rfc5277.html#section-2.1.1)).
+    ///
+    /// `stop_time` requires `start_time`. `stop_time` earlier than `start_time`
+    /// is rejected.
     pub fn new_create_subscription(
         stream: Option<&str>,
         filter: Option<Filter>,
-        duration: Option<Duration>,
-    ) -> RpcOperation {
-        let (start_time, stop_time) = if let Some(duration) = duration {
-            let now = OffsetDateTime::now_utc();
-            (Some(now), Some(now.add(duration)))
-        } else {
-            (None, None)
-        };
-        RpcOperation::CreateSubscription(CreateSubscription {
+        start_time: Option<OffsetDateTime>,
+        stop_time: Option<OffsetDateTime>,
+    ) -> error::NetconfClientResult<RpcOperation> {
+        if let Some(stop) = stop_time {
+            let Some(start) = start_time else {
+                return Err(error::NetconfClientError::new(
+                    "stopTime requires startTime (RFC5277 2.1.1)",
+                ));
+            };
+            if stop < start {
+                return Err(error::NetconfClientError::new(
+                    "stopTime is earlier than startTime (RFC5277 2.1.1)",
+                ));
+            }
+        }
+        Ok(RpcOperation::CreateSubscription(CreateSubscription {
             xmlns: "urn:ietf:params:xml:ns:netconf:notification:1.0".to_string(),
-            stream: stream.map(|s| s.to_string()),
+            stream: stream.map(str::to_string),
             filter,
             start_time,
             stop_time,
-        })
+        }))
     }
 
     /// `<edit-config>` ([RFC6241 7.2](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.2)).
@@ -1108,6 +1117,44 @@ pub struct ErrorInfo {
     pub session_id: Option<u64>,
 }
 
+/// Parse an RFC 3339 timestamp for `<create-subscription>` replay.
+pub fn parse_date_time(value: &str) -> error::NetconfClientResult<OffsetDateTime> {
+    OffsetDateTime::parse(value, &Rfc3339).map_err(|err| {
+        error::NetconfClientError::new(format!("invalid date-time '{value}': {err}"))
+    })
+}
+
+fn format_date_time(value: OffsetDateTime) -> error::NetconfClientResult<String> {
+    value
+        .format(&Rfc3339)
+        .map_err(|err| error::NetconfClientError::new(format!("failed to format date-time: {err}")))
+}
+
+/// RFC 3339 start/stop for a replay window of `duration`.
+///
+/// If `start_time` is omitted, start is now (UTC) and stop is now + `duration`.
+/// Otherwise stop is `start_time` + `duration`.
+pub fn replay_window(
+    start_time: Option<&str>,
+    duration: core::time::Duration,
+) -> error::NetconfClientResult<(String, String)> {
+    if duration.is_zero() {
+        return Err(error::NetconfClientError::new(
+            "duration must be greater than zero",
+        ));
+    }
+    let start = match start_time {
+        Some(value) => parse_date_time(value)?,
+        None => OffsetDateTime::now_utc(),
+    };
+    let add = time::Duration::try_from(duration)
+        .map_err(|err| error::NetconfClientError::new(format!("duration too large: {err}")))?;
+    let stop = start
+        .checked_add(add)
+        .ok_or_else(|| error::NetconfClientError::new("duration overflows stopTime"))?;
+    Ok((format_date_time(start)?, format_date_time(stop)?))
+}
+
 /// `<create-subscription>` body ([RFC5277 2.1.1](https://www.rfc-editor.org/rfc/rfc5277.html#section-2.1.1)).
 #[derive(Debug, Serialize)]
 pub struct CreateSubscription {
@@ -1136,8 +1183,6 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use quick_xml::de::from_str;
-    use time::Duration;
-    use time::format_description::well_known::Rfc3339;
 
     fn rpc(operation: RpcOperation) -> Rpc {
         Rpc {
@@ -1563,27 +1608,80 @@ mod tests {
 <rpc message-id="c1be0e7f-3cbc-413f-8aa8-18ed663221d4" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
   <create-subscription xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
     <stream>NETCONF</stream>
-    <startTime>|start|</startTime>
-    <stopTime>|stop|</stopTime>
+    <startTime>2026-01-01T00:00:00Z</startTime>
+    <stopTime>2026-01-01T00:01:00Z</stopTime>
   </create-subscription>
 </rpc>
 "#;
-        let start_time = OffsetDateTime::now_utc();
-        let stop_time = start_time
-            .checked_add(Duration::checked_seconds_f32(60.0).unwrap())
-            .unwrap();
-        let subscription = rpc(RpcOperation::CreateSubscription(CreateSubscription {
-            xmlns: "urn:ietf:params:xml:ns:netconf:notification:1.0".to_string(),
-            stream: Some("NETCONF".to_string()),
-            filter: None,
-            start_time: Some(start_time),
-            stop_time: Some(stop_time),
-        }));
-        let expected = expected
-            .trim()
-            .replace("|start|", start_time.format(&Rfc3339).unwrap().as_str())
-            .replace("|stop|", stop_time.format(&Rfc3339).unwrap().as_str());
-        assert_eq!(subscription.to_string(), expected);
+        let start_time = parse_date_time("2026-01-01T00:00:00Z").unwrap();
+        let stop_time = parse_date_time("2026-01-01T00:01:00Z").unwrap();
+        let subscription = rpc(RpcOperation::new_create_subscription(
+            Some("NETCONF"),
+            None,
+            Some(start_time),
+            Some(stop_time),
+        )
+        .unwrap());
+        assert_eq!(subscription.to_string(), expected.trim());
+    }
+
+    #[test]
+    fn create_subscription_start_only_omits_stop() {
+        let expected = r#"
+<rpc message-id="c1be0e7f-3cbc-413f-8aa8-18ed663221d4" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <create-subscription xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
+    <startTime>2026-01-01T00:00:00Z</startTime>
+  </create-subscription>
+</rpc>
+"#;
+        let start_time = parse_date_time("2026-01-01T00:00:00Z").unwrap();
+        let subscription =
+            rpc(RpcOperation::new_create_subscription(None, None, Some(start_time), None).unwrap());
+        assert_eq!(subscription.to_string(), expected.trim());
+    }
+
+    #[test]
+    fn create_subscription_stop_requires_start() {
+        let stop = parse_date_time("2026-01-01T00:01:00Z").unwrap();
+        let err = RpcOperation::new_create_subscription(None, None, None, Some(stop)).unwrap_err();
+        assert!(
+            err.to_string().contains("stopTime requires startTime"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn create_subscription_stop_before_start_is_error() {
+        let start = parse_date_time("2026-01-01T00:01:00Z").unwrap();
+        let stop = parse_date_time("2026-01-01T00:00:00Z").unwrap();
+        let err =
+            RpcOperation::new_create_subscription(None, None, Some(start), Some(stop)).unwrap_err();
+        assert!(err.to_string().contains("earlier than startTime"), "{err}");
+    }
+
+    #[test]
+    fn parse_date_time_rejects_garbage() {
+        let err = parse_date_time("yesterday").unwrap_err();
+        assert!(err.to_string().contains("invalid date-time"), "{err}");
+    }
+
+    #[test]
+    fn replay_window_from_start_and_duration() {
+        let (start, stop) = replay_window(
+            Some("2026-01-01T00:00:00Z"),
+            core::time::Duration::from_secs(60),
+        )
+        .unwrap();
+        assert_eq!(start, "2026-01-01T00:00:00Z");
+        assert_eq!(stop, "2026-01-01T00:01:00Z");
+    }
+
+    #[test]
+    fn replay_window_without_start_uses_now() {
+        let (start, stop) = replay_window(None, core::time::Duration::from_secs(60)).unwrap();
+        let start = parse_date_time(&start).unwrap();
+        let stop = parse_date_time(&stop).unwrap();
+        assert_eq!(stop - start, time::Duration::seconds(60));
     }
 
     #[test]

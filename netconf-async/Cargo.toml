@@ -29,7 +29,7 @@ quick-xml = { version = "0.41", features = ["serialize", "overlapped-lists"] }
 russh = { version = "0.63", optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-time = { version = "0.3", default-features = false, features = ["serde", "std", "formatting"] }
+time = { version = "0.3", default-features = false, features = ["serde", "std", "formatting", "parsing"] }
 tokio = { version = "1", features = ["io-util", "sync", "time"], default-features = false, optional = true }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 zeroize = { version = "1", optional = true }

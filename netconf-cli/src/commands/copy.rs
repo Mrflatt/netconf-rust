@@ -64,10 +64,11 @@ pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()
     match conn.copy_config(source, target).await {
         Ok(resp) => {
             info!("Response:\n{}", resp);
+            Ok(())
         }
         Err(err) => {
             error!("Copy error: {}", err);
+            Err(err)
         }
-    };
-    Ok(())
+    }
 }
