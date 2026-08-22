@@ -12,7 +12,7 @@ Talk to routers and switches over SSH using the `netconf` subsystem. The library
 - Async client on Tokio (`netconf-async`)
 - SSH transport via the NETCONF subsystem ([RFC 6242](https://www.rfc-editor.org/rfc/rfc6242.html))
 - Automatic upgrade from base 1.0 (`]]>]]>`) to base 1.1 chunked framing
-- RPCs: `<get>`, `<get-config>`, `<validate>`, `<commit>` / confirmed-commit, `<close-session>`, `<kill-session>`
+- RPCs: `<get>`, `<get-config>`, `<edit-config>`, `<copy-config>`, `<delete-config>`, `<lock>` / `<unlock>`, `<validate>`, `<commit>` / confirmed-commit / `<cancel-commit>`, `<discard-changes>`, `<close-session>`, `<kill-session>`, raw RPC
 - Event notifications via `<create-subscription>` ([RFC 5277](https://www.rfc-editor.org/rfc/rfc5277.html))
 - Subtree filters and `with-defaults` ([RFC 6243](https://www.rfc-editor.org/rfc/rfc6243.html))
 - CLI with parallel multi-host runs, OpenSSH config, ssh-agent, and single-hop `ProxyJump`
@@ -87,7 +87,7 @@ async fn main() -> netconf_async::error::NetconfClientResult<()> {
 
 `Connection::new` performs the `<hello>` exchange and upgrades the framer when the server advertises `urn:ietf:params:netconf:base:1.1`. If you skip `close_session`, `Drop` will try to close the session.
 
-Other methods on `Connection`: `validate`, `commit`, `confirmed_commit`, `kill_session`, `notification`.
+Other methods on `Connection`: `edit_config`, `copy_config`, `delete_config`, `lock`, `unlock`, `validate`, `commit`, `confirmed_commit`, `confirm_commit`, `cancel_commit`, `discard_changes`, `kill_session`, `raw_rpc`, `notification`. `has_capability` reflects the server `<hello>`.
 
 ### Features
 
@@ -115,6 +115,18 @@ netconf-cli get-config \
 
 # operational state (filter file required)
 netconf-cli get --host router.example --username netconf -f system.xml
+
+# edit: lock → edit-config → validate → commit → unlock → copy running→startup
+netconf-cli edit --host router.example --username netconf -f changes.xml
+# directory: apply 1-foo.xml, 2-bar.xml in name order, then commit once
+netconf-cli edit --host router.example --username netconf -f ./changes/
+
+# persist confirmed-commit, then confirm (or --cancel) from another session
+netconf-cli edit --host router.example --username netconf -f changes.xml --confirmed
+netconf-cli commit --host router.example --username netconf --id <persist-id>
+
+# raw RPC document (or a directory of them, executed in name order)
+netconf-cli rpc --host router.example --username netconf -f custom-rpc.xml
 
 # notifications (Ctrl-C to stop)
 netconf-cli notification --host router.example --username netconf

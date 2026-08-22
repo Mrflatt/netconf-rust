@@ -103,6 +103,7 @@ pub fn cli() -> Command {
     <cyan,bold>get-config</>        Execute get-config rpc
     <cyan,bold>edit</>              Execute edit-config rpc
     <cyan,bold>copy</>              Execute copy-config rpc
+    <cyan,bold>commit</>            Commit candidate or confirm/cancel persist commit
     <cyan,bold>rpc</>               Execute raw rpc
     <cyan,bold>notification</>      Start netconf notification listener
     <cyan,bold>update</>            Update netconf-cli from GitHub releases
