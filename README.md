@@ -87,7 +87,7 @@ async fn main() -> netconf_async::error::NetconfClientResult<()> {
 }
 ```
 
-`Connection::new` performs the `<hello>` exchange and upgrades the framer when the server advertises `urn:ietf:params:netconf:base:1.1`. If you skip `close_session`, `Drop` will try to close the session.
+`Connection::new` performs the `<hello>` exchange and upgrades the framer when the server advertises `urn:ietf:params:netconf:base:1.1`. Call `close_session` when you are done; dropping an open session only logs a warning, because a clean shutdown has to await I/O.
 
 Other methods on `Connection`: `edit_config`, `copy_config`, `delete_config`, `lock`, `unlock`, `validate`, `commit`, `confirmed_commit`, `confirm_commit`, `cancel_commit`, `discard_changes`, `kill_session`, `raw_rpc`, `notification`. `has_capability` reflects the server `<hello>`.
 
@@ -95,9 +95,8 @@ Other methods on `Connection`: `edit_config`, `copy_config`, `delete_config`, `l
 
 | Feature | Default | Purpose |
 |---|---|---|
-| `tokio` | yes | runtime integration, notifications, `Drop` |
-| `async-ssh2-lite` | yes | `SSHTransport` |
-| `async-trait` | yes | `Transport` / `Framer` traits |
+| `ssh` | yes | `SSHTransport` over `async-ssh2-lite` (implies `tokio`) |
+| `tokio` | yes | Tokio framer, RPC timeouts, notification streams |
 | `vendored-openssl` | no | static OpenSSL |
 | `openssl-on-win32` | no | OpenSSL instead of WinCNG on Windows |
 
