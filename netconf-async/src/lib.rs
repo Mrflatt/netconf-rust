@@ -13,11 +13,13 @@
 //! ```no_run
 //! use netconf_async::connection::Connection;
 //! use netconf_async::message::{Datastore, Filter};
-//! use netconf_async::transport::ssh::SSHTransport;
+//! use netconf_async::transport::ssh::{HostKeyPolicy, SshAuth, SshConfig, SSHTransport};
 //!
 //! # async fn run() -> netconf_async::error::NetconfClientResult<()> {
-//! let transport =
-//!     SSHTransport::new_with_user_auth("192.0.2.10:830", "netconf", "secret").await?;
+//! let transport = SSHTransport::connect(
+//!     SshConfig::new("192.0.2.10", 830, "netconf", SshAuth::password("secret"))
+//!         .host_key(HostKeyPolicy::Fingerprint("SHA256:base64fingerprint".into())),
+//! ).await?;
 //! let mut conn = Connection::new(transport).await?;
 //!
 //! let running = conn.get_config(Datastore::Running, None, None).await?;
@@ -40,10 +42,12 @@
 //! [`close_session`](connection::Connection::close_session) is not something
 //! [`Drop`] can do for you; dropping an open session only logs a warning.
 //!
-//! Password auth is the short path. For ssh-agent or key files, build an
-//! authenticated `async_ssh2_lite::AsyncSession` and wrap it with
-//! [`SSHTransport::new_with_session`](transport::ssh::SSHTransport::new_with_session).
-//! A custom byte pipe implements [`Transport`](transport::Transport).
+//! [`SSHTransport::connect`](transport::ssh::SSHTransport::connect) takes
+//! [`SshAuth`](transport::ssh::SshAuth) (password, agent, or key file) and an
+//! optional ProxyJump chain. Host-key policy defaults to
+//! [`RejectAll`](transport::ssh::HostKeyPolicy::RejectAll); pin a fingerprint
+//! or a `known_hosts` file. A custom byte pipe implements
+//! [`Transport`](transport::Transport).
 //!
 //! # Session flow
 //!
@@ -52,8 +56,11 @@
 //! 3. If the server advertises [`NETCONF_BASE_11_CAP`], upgrade to chunked
 //!    framing ([RFC 6242](https://www.rfc-editor.org/rfc/rfc6242.html)).
 //! 4. Each RPC is written and the reply parsed as
-//!    [`RpcReply`](message::RpcReply); any `<rpc-error>` becomes
-//!    [`NetconfClientError::Netconf`](error::NetconfClientError::Netconf).
+//!    [`RpcReply`](message::RpcReply). The reply `message-id` must match.
+//!    Error-severity `<rpc-error>` becomes
+//!    [`NetconfClientError::Netconf`](error::NetconfClientError::Netconf);
+//!    warning-only replies succeed unless
+//!    [`set_warnings_as_errors`](connection::Connection::set_warnings_as_errors).
 //! 5. [`close_session`](connection::Connection::close_session) ends the session
 //!    and tears the transport down.
 //!
@@ -100,3 +107,5 @@ pub const VALIDATE_CAP: &str = "urn:ietf:params:netconf:capability:validate:1.1"
 pub const WITH_DEFAULTS_CAP: &str = "urn:ietf:params:netconf:capability:with-defaults:1.0";
 /// `:notification:1.0` capability ([RFC5277](https://www.rfc-editor.org/rfc/rfc5277.html)).
 pub const NOTIFICATION_CAP: &str = "urn:ietf:params:netconf:capability:notification:1.0";
+/// Default NETCONF-over-SSH port ([RFC6242](https://www.rfc-editor.org/rfc/rfc6242.html)).
+pub const DEFAULT_NETCONF_SSH_PORT: u16 = 830;

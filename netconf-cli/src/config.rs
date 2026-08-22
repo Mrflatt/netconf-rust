@@ -1,22 +1,16 @@
 use crate::commands::builtin::{value_of_if_exists, values_of};
-use async_ssh2_lite::{AsyncSession, SessionConfiguration};
 use clap::ArgMatches;
 use dirs::home_dir;
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use netconf_async::error::{NetconfClientError, NetconfClientResult};
-use ssh2::MethodType;
+use netconf_async::transport::ssh::{
+    HostKeyPolicy, SshAuth, SshConfig as TransportSshConfig, SshJump, SshSessionOpts,
+};
 use ssh2_config::{DefaultAlgorithms, HostParams, ParseRule, SshConfig};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::time::timeout;
-
-/// libssh2 caps every blocking call with this, reads included, so it has to
-/// leave room for a slow device to answer a large `<get-config>`.
-const SSH_TIMEOUT_MS: u32 = 30_000;
 
 #[derive(Debug, Clone)]
 pub struct CliConfig {
@@ -30,6 +24,7 @@ pub struct Config {
     pub username: Option<String>,
     pub password: Option<String>,
     pub addresses: Vec<String>,
+    pub strict_host_key: Option<HostKeyCheck>,
 }
 
 impl CliConfig {
@@ -43,6 +38,8 @@ impl CliConfig {
             .collect();
         let username = value_of_if_exists::<String>("username", &args).cloned();
         let password = value_of_if_exists::<String>("password", &args).cloned();
+        let strict_host_key = value_of_if_exists::<String>("strict-host-key-checking", &args)
+            .and_then(|value| parse_host_key_check(value));
         Ok(Self {
             inner: Arc::new(Config {
                 username,
@@ -50,6 +47,7 @@ impl CliConfig {
                 addresses: hosts,
                 args,
                 ssh_config,
+                strict_host_key,
             }),
         })
     }
@@ -69,7 +67,10 @@ fn read_ssh_config(dir: &Path) -> Option<SshConfig> {
             return None;
         }
     };
-    match SshConfig::default().parse(&mut reader, ParseRule::ALLOW_UNKNOWN_FIELDS) {
+    match SshConfig::default().parse(
+        &mut reader,
+        ParseRule::ALLOW_UNKNOWN_FIELDS | ParseRule::ALLOW_UNSUPPORTED_FIELDS,
+    ) {
         Ok(config) => {
             debug!("Successfully parsed configuration");
             Some(config)
@@ -161,6 +162,7 @@ pub struct Host {
     auth_password: Option<String>,
     params: HostParams,
     ssh_config: Option<SshConfig>,
+    strict_host_key: Option<HostKeyCheck>,
 }
 
 impl Host {
@@ -192,141 +194,48 @@ impl Host {
             auth_user,
             auth_password: password.clone(),
             ssh_config,
+            strict_host_key: None,
         })
     }
 
-    pub(crate) async fn connect_ssh(&self) -> NetconfClientResult<AsyncSession<TcpStream>> {
-        let stream = self.tcp_connect_timeout().await?;
-        self.handshake_and_auth(stream).await
+    /// CLI / ssh_config override for host-key checking. `None` means default AcceptNew.
+    pub(crate) fn strict_host_key(mut self, value: Option<HostKeyCheck>) -> Self {
+        self.strict_host_key = value;
+        self
     }
 
-    async fn handshake_and_auth(
-        &self,
-        stream: TcpStream,
-    ) -> NetconfClientResult<AsyncSession<TcpStream>> {
-        let mut configuration = SessionConfiguration::new();
-        configuration.set_timeout(SSH_TIMEOUT_MS);
-        if let Some(compress) = &self.params.compression {
-            debug!(target: &self.address, "Setting compression: {}", compress);
-            configuration.set_compress(*compress);
-        }
-        if self.params.tcp_keep_alive.unwrap_or(false)
-            && let Some(interval) = self.params.server_alive_interval
-        {
-            let interval = interval.as_secs() as u32;
-            debug!(target: &self.address, "Setting keepalive interval: {} seconds", interval);
-            configuration.set_keepalive(true, interval);
-        }
-        let mut session = AsyncSession::new(stream, configuration)?;
-        configure_session(&mut session, &self.params).await?;
-        session.handshake().await?;
-
-        if let Some(password) = &self.auth_password {
-            session.userauth_password(&self.auth_user, password).await?;
-        } else {
-            let mut agent = session.agent()?;
-            agent.connect().await?;
-            agent.list_identities().await?;
-
-            for identity in agent.identities().unwrap() {
+    /// Library SSH config. Host keys default to [`HostKeyPolicy::AcceptNew`].
+    /// Jump auth is IdentityFile or agent — the device password is not reused.
+    pub(crate) fn ssh_transport_config(&self) -> NetconfClientResult<TransportSshConfig> {
+        let mut config = TransportSshConfig::new(
+            &self.address,
+            self.port,
+            &self.auth_user,
+            ssh_auth(&self.auth_password, &self.params),
+        )
+        .host_key(host_key_policy(&self.params, self.strict_host_key))
+        .session(session_opts(&self.params));
+        if let Some(jumps) = self.params.proxy_jump.as_deref() {
+            for spec in jumps {
+                let jump = self.resolve_jump(spec)?;
                 debug!(
                     target: &self.address,
-                    "Trying authentication with public key '{}'",
-                    identity.comment()
+                    "Connecting via ProxyJump {spec} ({}:{})",
+                    jump.address, jump.port
                 );
-                match agent.userauth(&self.auth_user, &identity).await {
-                    Ok(_) => break,
-                    Err(err) => {
-                        debug!(
-                            target: &self.address,
-                            "Public key '{}' rejected: {}",
-                            identity.comment(),
-                            err
-                        );
-                        continue;
-                    }
-                }
+                config = config.jump(
+                    SshJump::new(
+                        &jump.address,
+                        jump.port,
+                        &jump.auth_user,
+                        ssh_auth(&None, &jump.params),
+                    )
+                    .host_key(host_key_policy(&jump.params, jump.strict_host_key))
+                    .session(session_opts(&jump.params)),
+                );
             }
         }
-
-        if !session.authenticated() {
-            return Err(NetconfClientError::new(format!(
-                "SSH authentication failed for {}@{}:{}",
-                self.auth_user, self.address, self.port
-            )));
-        }
-        Ok(session)
-    }
-
-    async fn tcp_connect_timeout(&self) -> NetconfClientResult<TcpStream> {
-        match self.params.proxy_jump.as_deref() {
-            Some(jumps) if !jumps.is_empty() => self.connect_via_proxy_jump(jumps).await,
-            _ => self.connect_direct().await,
-        }
-    }
-
-    async fn connect_direct(&self) -> NetconfClientResult<TcpStream> {
-        timeout(
-            Duration::from_secs(10),
-            TcpStream::connect((self.address.as_str(), self.port)),
-        )
-        .await
-        .map_err(|_| {
-            NetconfClientError::new(format!(
-                "timeout connecting to {}:{}",
-                self.address, self.port
-            ))
-        })?
-        .map_err(Into::into)
-    }
-
-    async fn connect_via_proxy_jump(&self, jumps: &[String]) -> NetconfClientResult<TcpStream> {
-        if jumps.len() != 1 {
-            return Err(NetconfClientError::new(format!(
-                "only one ProxyJump hop supported, got: {}",
-                jumps.join(",")
-            )));
-        }
-
-        let jump = self.resolve_jump(&jumps[0])?;
-        debug!(
-            target: &self.address,
-            "Connecting via ProxyJump {} ({}:{})",
-            jumps[0], jump.address, jump.port
-        );
-        let jump_stream = jump.connect_direct().await?;
-        let jump_session = jump.handshake_and_auth(jump_stream).await?;
-        info!(
-            target: &self.address,
-            "Connected to proxy {}:{}",
-            jump.address, jump.port
-        );
-
-        let channel = jump_session
-            .channel_direct_tcpip(&self.address, self.port, Some(("127.0.0.1", 22)))
-            .await?;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let local_addr = listener.local_addr()?;
-        tokio::spawn(async move {
-            let _keep_jump = jump_session;
-            match listener.accept().await {
-                Ok((mut sock, _)) => {
-                    let mut channel = channel;
-                    if let Err(err) = tokio::io::copy_bidirectional(&mut channel, &mut sock).await {
-                        debug!("ProxyJump tunnel closed: {err}");
-                    }
-                }
-                Err(err) => error!("ProxyJump local accept failed: {err}"),
-            }
-        });
-
-        timeout(Duration::from_secs(10), TcpStream::connect(local_addr))
-            .await
-            .map_err(|_| {
-                NetconfClientError::new("timeout connecting through ProxyJump".to_string())
-            })?
-            .map_err(Into::into)
+        Ok(config)
     }
 
     fn resolve_jump(&self, spec: &str) -> NetconfClientResult<Host> {
@@ -339,59 +248,127 @@ impl Host {
             params.port = spec.port;
         }
         let user = spec.user.or(params.user.clone());
-        Host::new(
+        Ok(Host::new(
             &spec.host,
             &user,
             &None,
             params,
             22,
             self.ssh_config.clone(),
-        )
+        )?
+        .strict_host_key(self.strict_host_key))
     }
 }
-async fn configure_session(
-    session: &mut AsyncSession<TcpStream>,
-    params: &HostParams,
-) -> NetconfClientResult<()> {
+
+fn ssh_auth(password: &Option<String>, params: &HostParams) -> SshAuth {
+    if let Some(password) = password {
+        return SshAuth::password(password.clone());
+    }
+    if let Some(files) = params.identity_file.as_ref()
+        && let Some(path) = files.first()
+    {
+        if files.len() > 1 {
+            debug!(
+                "using first IdentityFile {}; extra files are ignored",
+                path.display()
+            );
+        }
+        return SshAuth::key_file(expand_tilde(path), None);
+    }
+    SshAuth::Agent
+}
+
+/// How the CLI should treat SSH host keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostKeyCheck {
+    /// Accept any key.
+    Off,
+    /// Reject unknown hosts and changed keys.
+    Strict,
+    /// Accept unknown hosts and pin them; reject changed keys.
+    AcceptNew,
+}
+
+fn host_key_policy(params: &HostParams, strict: Option<HostKeyCheck>) -> HostKeyPolicy {
+    match strict
+        .or_else(|| ssh_config_host_key_check(params))
+        .unwrap_or(HostKeyCheck::AcceptNew)
+    {
+        HostKeyCheck::Off => HostKeyPolicy::AcceptAll,
+        HostKeyCheck::Strict => HostKeyPolicy::KnownHosts(known_hosts_path(params)),
+        HostKeyCheck::AcceptNew => HostKeyPolicy::AcceptNew(known_hosts_path(params)),
+    }
+}
+
+fn ssh_config_host_key_check(params: &HostParams) -> Option<HostKeyCheck> {
+    params
+        .unsupported_fields
+        .get("stricthostkeychecking")
+        .and_then(|values| values.first())
+        .and_then(|value| parse_host_key_check(value))
+}
+
+fn parse_host_key_check(value: &str) -> Option<HostKeyCheck> {
+    match value.to_ascii_lowercase().as_str() {
+        "yes" | "true" | "ask" => Some(HostKeyCheck::Strict),
+        "accept-new" | "acceptnew" => Some(HostKeyCheck::AcceptNew),
+        "no" | "false" | "off" => Some(HostKeyCheck::Off),
+        _ => None,
+    }
+}
+
+fn known_hosts_path(params: &HostParams) -> PathBuf {
+    if let Some(paths) = params.unsupported_fields.get("userknownhostsfile")
+        && let Some(raw) = paths.first()
+        && let Some(first) = raw.split_whitespace().next()
+    {
+        return expand_tilde(Path::new(first));
+    }
+    default_known_hosts_path()
+}
+
+fn default_known_hosts_path() -> PathBuf {
+    let mut path = home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    path.push(".ssh/known_hosts");
+    path
+}
+
+fn session_opts(params: &HostParams) -> SshSessionOpts {
+    let mut opts = SshSessionOpts::new();
+    if let Some(compress) = params.compression {
+        opts = opts.compression(compress);
+    }
+    if params.tcp_keep_alive.unwrap_or(false)
+        && let Some(interval) = params.server_alive_interval
+    {
+        opts = opts.keepalive(interval);
+    }
     if !params.kex_algorithms.is_default() {
-        session
-            .method_pref(
-                MethodType::Kex,
-                params.kex_algorithms.algorithms().join(",").as_str(),
-            )
-            .await?;
+        opts = opts.kex_algorithms(params.kex_algorithms.algorithms().join(","));
     }
     if !params.host_key_algorithms.is_default() {
-        session
-            .method_pref(
-                MethodType::HostKey,
-                params.host_key_algorithms.algorithms().join(",").as_str(),
-            )
-            .await?;
+        opts = opts.host_key_algorithms(params.host_key_algorithms.algorithms().join(","));
     }
     if !params.ciphers.is_default() {
-        session
-            .method_pref(
-                MethodType::CryptCs,
-                params.ciphers.algorithms().join(",").as_str(),
-            )
-            .await?;
+        opts = opts.ciphers(params.ciphers.algorithms().join(","));
     }
     if !params.mac.is_default() {
-        session
-            .method_pref(
-                MethodType::MacCs,
-                params.mac.algorithms().join(",").as_str(),
-            )
-            .await?;
-        session
-            .method_pref(
-                MethodType::MacSc,
-                params.mac.algorithms().join(",").as_str(),
-            )
-            .await?;
+        opts = opts.macs(params.mac.algorithms().join(","));
     }
-    Ok(())
+    opts
+}
+
+fn expand_tilde(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        let mut home = home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        home.push(rest);
+        return home;
+    }
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -616,5 +593,255 @@ mod tests {
 
         let jump = device.resolve_jump("jump:2200").unwrap();
         assert_eq!(jump.port, 2200);
+    }
+
+    #[test]
+    fn ssh_transport_config_maps_password_and_agent_jump() {
+        let mut device_params = HostParams::new(&DefaultAlgorithms::default());
+        device_params.proxy_jump = Some(vec!["jump-user@jump:22".into()]);
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("netconf-user".into()),
+            &Some("device-secret".into()),
+            device_params,
+            830,
+            None,
+        )
+        .unwrap();
+
+        let cfg = device.ssh_transport_config().unwrap();
+        assert_eq!(cfg.host(), "192.0.2.10");
+        assert_eq!(cfg.port(), 830);
+        assert_eq!(cfg.username(), "netconf-user");
+        assert!(matches!(cfg.auth(), SshAuth::Password(_)));
+        assert!(matches!(cfg.host_key_policy(), HostKeyPolicy::AcceptNew(_)));
+        let jump = &cfg.jumps()[0];
+        assert_eq!(jump.host(), "jump");
+        assert_eq!(jump.port(), 22);
+        assert_eq!(jump.username(), "jump-user");
+        assert_eq!(jump.auth(), &SshAuth::Agent);
+        assert!(matches!(
+            jump.host_key_policy(),
+            HostKeyPolicy::AcceptNew(_)
+        ));
+    }
+
+    #[test]
+    fn ssh_transport_config_maps_multi_hop_proxy_jump() {
+        let config = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new(
+                    "Host jump1\n  HostName j1.example\n  User u1\n  Port 22\n\
+                     Host jump2\n  HostName j2.example\n  User u2\n  Port 2222\n",
+                ),
+                ParseRule::STRICT,
+            )
+            .unwrap();
+        let mut device_params = HostParams::new(&DefaultAlgorithms::default());
+        device_params.proxy_jump = Some(vec!["jump1".into(), "jump2".into()]);
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("netconf-user".into()),
+            &Some("device-secret".into()),
+            device_params,
+            830,
+            Some(config),
+        )
+        .unwrap();
+
+        let hops = device.ssh_transport_config().unwrap().jumps().to_vec();
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[0].host(), "j1.example");
+        assert_eq!(hops[0].username(), "u1");
+        assert_eq!(hops[0].port(), 22);
+        assert_eq!(hops[1].host(), "j2.example");
+        assert_eq!(hops[1].username(), "u2");
+        assert_eq!(hops[1].port(), 2222);
+        assert!(hops.iter().all(|h| matches!(h.auth(), SshAuth::Agent)));
+    }
+
+    #[test]
+    fn ssh_transport_config_maps_identity_file_and_session_opts() {
+        let config = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new(
+                    "Host *\n\
+                     IdentityFile ~/.ssh/id_ed25519\n\
+                     Compression yes\n\
+                     TCPKeepAlive yes\n\
+                     ServerAliveInterval 15\n\
+                     Ciphers aes256-ctr\n\
+                     KexAlgorithms curve25519-sha256\n\
+                     MACs hmac-sha2-256\n\
+                     HostKeyAlgorithms ssh-ed25519\n",
+                ),
+                ParseRule::STRICT,
+            )
+            .unwrap();
+        let params = config.query("192.0.2.10");
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("netconf-user".into()),
+            &None,
+            params,
+            830,
+            Some(config),
+        )
+        .unwrap();
+
+        let cfg = device.ssh_transport_config().unwrap();
+        match cfg.auth() {
+            SshAuth::KeyFile { path, passphrase } => {
+                assert!(path.ends_with(".ssh/id_ed25519"), "{path:?}");
+                assert!(passphrase.is_none());
+            }
+            other => panic!("expected KeyFile, got {other:?}"),
+        }
+        assert_eq!(cfg.session_opts().compression_enabled(), Some(true));
+        assert_eq!(
+            cfg.session_opts().keepalive_interval(),
+            Some(std::time::Duration::from_secs(15))
+        );
+        assert_eq!(cfg.session_opts().ciphers_pref(), Some("aes256-ctr"));
+        assert_eq!(cfg.session_opts().kex(), Some("curve25519-sha256"));
+        assert_eq!(cfg.session_opts().macs_pref(), Some("hmac-sha2-256"));
+        assert_eq!(cfg.session_opts().host_key_algs(), Some("ssh-ed25519"));
+    }
+
+    #[test]
+    fn password_wins_over_identity_file() {
+        let mut params = HostParams::new(&DefaultAlgorithms::default());
+        params.identity_file = Some(vec![PathBuf::from("/tmp/id")]);
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("netconf-user".into()),
+            &Some("device-secret".into()),
+            params,
+            830,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            device.ssh_transport_config().unwrap().auth(),
+            SshAuth::Password(_)
+        ));
+    }
+
+    #[test]
+    fn host_keys_default_to_accept_new() {
+        let params = HostParams::new(&DefaultAlgorithms::default());
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("u".into()),
+            &Some("p".into()),
+            params,
+            830,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            device.ssh_transport_config().unwrap().host_key_policy(),
+            HostKeyPolicy::AcceptNew(_)
+        ));
+    }
+
+    #[test]
+    fn ssh_config_can_disable_host_key_checking() {
+        let config = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new("Host *\n  StrictHostKeyChecking no\n"),
+                ParseRule::ALLOW_UNSUPPORTED_FIELDS,
+            )
+            .unwrap();
+        let params = config.query("192.0.2.10");
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("u".into()),
+            &Some("p".into()),
+            params,
+            830,
+            Some(config),
+        )
+        .unwrap();
+        assert_eq!(
+            device.ssh_transport_config().unwrap().host_key_policy(),
+            &HostKeyPolicy::AcceptAll
+        );
+    }
+
+    #[test]
+    fn strict_host_key_checking_uses_known_hosts() {
+        let config = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new(
+                    "Host *\n  StrictHostKeyChecking yes\n  UserKnownHostsFile /tmp/kh\n",
+                ),
+                ParseRule::ALLOW_UNSUPPORTED_FIELDS,
+            )
+            .unwrap();
+        let params = config.query("192.0.2.10");
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("u".into()),
+            &Some("p".into()),
+            params,
+            830,
+            Some(config),
+        )
+        .unwrap();
+        assert_eq!(
+            device.ssh_transport_config().unwrap().host_key_policy(),
+            &HostKeyPolicy::KnownHosts(PathBuf::from("/tmp/kh"))
+        );
+    }
+
+    #[test]
+    fn accept_new_maps_to_tofu_policy() {
+        let config = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new("Host *\n  StrictHostKeyChecking accept-new\n"),
+                ParseRule::ALLOW_UNSUPPORTED_FIELDS,
+            )
+            .unwrap();
+        let params = config.query("192.0.2.10");
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("u".into()),
+            &Some("p".into()),
+            params,
+            830,
+            Some(config),
+        )
+        .unwrap();
+        assert!(matches!(
+            device.ssh_transport_config().unwrap().host_key_policy(),
+            HostKeyPolicy::AcceptNew(_)
+        ));
+    }
+
+    #[test]
+    fn cli_strict_host_key_override_wins() {
+        let params = HostParams::new(&DefaultAlgorithms::default());
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("u".into()),
+            &Some("p".into()),
+            params,
+            830,
+            None,
+        )
+        .unwrap()
+        .strict_host_key(Some(HostKeyCheck::Strict));
+        assert!(matches!(
+            device.ssh_transport_config().unwrap().host_key_policy(),
+            HostKeyPolicy::KnownHosts(_)
+        ));
+    }
+
+    #[test]
+    fn expand_tilde_rewrites_home() {
+        let expanded = expand_tilde(Path::new("~/.ssh/id_ed25519"));
+        assert!(!expanded.starts_with("~"), "{expanded:?}");
+        assert!(expanded.ends_with(".ssh/id_ed25519"), "{expanded:?}");
     }
 }

@@ -17,7 +17,7 @@ include = ["src/**/*", "tests/**/*", "LICENSE", "README.md", "CHANGELOG.md"]
 [features]
 default = ["ssh"]
 # NETCONF over SSH via `async-ssh2-lite`.
-ssh = ["dep:async-ssh2-lite", "tokio", "tokio/net"]
+ssh = ["dep:async-ssh2-lite", "dep:zeroize", "tokio", "tokio/net", "tokio/rt"]
 # Tokio-backed framer, RPC timeouts, and notification streams.
 tokio = ["dep:tokio"]
 vendored-openssl = ["ssh", "async-ssh2-lite/vendored-openssl"]
@@ -34,6 +34,7 @@ thiserror = "2"
 time = { version = "0.3", default-features = false, features = ["serde", "std", "formatting"] }
 tokio = { version = "1", features = ["io-util", "sync", "time"], default-features = false, optional = true }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
+zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
 async-trait = "0.1"

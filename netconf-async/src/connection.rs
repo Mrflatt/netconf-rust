@@ -26,6 +26,8 @@ pub struct Connection {
     session_id: Option<u64>,
     capabilities: Vec<String>,
     parse_replies: bool,
+    warnings_as_errors: bool,
+    next_message_id: u64,
     is_closed: bool,
     desynchronized: bool,
     #[cfg(feature = "tokio")]
@@ -44,6 +46,8 @@ impl Connection {
             session_id: None,
             capabilities: Vec::new(),
             parse_replies: true,
+            warnings_as_errors: false,
+            next_message_id: 1,
             is_closed: false,
             desynchronized: false,
             #[cfg(feature = "tokio")]
@@ -57,14 +61,29 @@ impl Connection {
     ///
     /// With parsing off, [`raw_rpc`](Self::raw_rpc) and the typed operations
     /// return the device's XML untouched and an `<rpc-error>` is *not* turned
-    /// into [`NetconfClientError::Netconf`].
+    /// into [`NetconfClientError::Netconf`]. `message-id` is still checked
+    /// when the reply can be parsed.
     pub fn set_parse_replies(&mut self, parse_replies: bool) {
         self.parse_replies = parse_replies;
     }
 
-    /// True when replies are parsed and `<rpc-error>` is surfaced as an error.
+    /// True when replies are parsed and error-severity `<rpc-error>` is surfaced.
     pub fn parse_replies(&self) -> bool {
         self.parse_replies
+    }
+
+    /// Treat warning-severity `<rpc-error>` as [`NetconfClientError::Netconf`].
+    ///
+    /// Off by default: `<rpc-error severity="warning">` plus `<ok/>` is
+    /// success, and the warnings stay in the returned XML (or come back from
+    /// [`Self::raw_rpc_with_warnings`]). Turn this on to fail the RPC instead.
+    pub fn set_warnings_as_errors(&mut self, warnings_as_errors: bool) {
+        self.warnings_as_errors = warnings_as_errors;
+    }
+
+    /// True when warning-severity `<rpc-error>` fails the RPC.
+    pub fn warnings_as_errors(&self) -> bool {
+        self.warnings_as_errors
     }
 
     /// Fail an RPC that gets no reply within `timeout`; unlimited by default.
@@ -97,7 +116,7 @@ impl Connection {
 
     async fn hello(&mut self) -> NetconfClientResult<Option<u64>> {
         let hello = Hello::new();
-        let response = self.write_and_receive(&hello.to_string()).await?;
+        let response = self.write_and_receive(&hello.to_string(), false).await?;
         debug!("Hello:\n{}", response);
 
         let hello: Hello = from_xml(&response)?;
@@ -273,7 +292,39 @@ impl Connection {
 
     /// Sends a raw XML RPC document and returns the reply.
     pub async fn raw_rpc(&mut self, xml: &str) -> NetconfClientResult<String> {
-        self.exchange(xml).await
+        self.exchange(
+            xml,
+            request_message_id(xml).as_deref(),
+            request_is_commit(xml),
+            self.warnings_as_errors,
+        )
+        .await
+    }
+
+    /// Like [`Self::raw_rpc`], but returns warning-severity `<rpc-error>`s
+    /// alongside the raw reply XML.
+    ///
+    /// Error-severity replies still become [`NetconfClientError::Netconf`]
+    /// (unless [`Self::set_parse_replies`] is off). Warning-only replies
+    /// succeed even when [`Self::set_warnings_as_errors`] is on, because this
+    /// method exists to collect them.
+    pub async fn raw_rpc_with_warnings(
+        &mut self,
+        xml: &str,
+    ) -> NetconfClientResult<(String, Vec<crate::message::Error>)> {
+        let response = self
+            .exchange(
+                xml,
+                request_message_id(xml).as_deref(),
+                request_is_commit(xml),
+                false,
+            )
+            .await?;
+        let warnings = match from_xml::<RpcReply>(&response) {
+            Ok(reply) => reply.warnings().into_iter().cloned().collect(),
+            Err(_) => Vec::new(),
+        };
+        Ok((response, warnings))
     }
 
     /// Issues the `<create-subscription>` operation as defined in [RFC5277 2.1.1](https://www.rfc-editor.org/rfc/rfc5277.html#section-2.1.1)
@@ -311,46 +362,144 @@ impl Connection {
         }
     }
 
-    async fn run_rpc(&mut self, rpc: Rpc) -> NetconfClientResult<String> {
-        self.exchange(&rpc.to_string()).await
+    async fn run_rpc(&mut self, mut rpc: Rpc) -> NetconfClientResult<String> {
+        let is_commit = rpc.is_commit();
+        let message_id = self.allocate_message_id();
+        rpc.set_message_id(&message_id);
+        self.exchange(
+            &rpc.to_string(),
+            Some(&message_id),
+            is_commit,
+            self.warnings_as_errors,
+        )
+        .await
     }
 
-    async fn exchange(&mut self, request: &str) -> NetconfClientResult<String> {
+    fn allocate_message_id(&mut self) -> String {
+        let id = self.next_message_id;
+        self.next_message_id += 1;
+        id.to_string()
+    }
+
+    async fn exchange(
+        &mut self,
+        request: &str,
+        expected_message_id: Option<&str>,
+        is_commit: bool,
+        warnings_as_errors: bool,
+    ) -> NetconfClientResult<String> {
         if self.desynchronized {
             return Err(NetconfClientError::SessionDesynchronized);
         }
-        let response = self.write_and_receive(request).await?;
+        let response = self.write_and_receive(request, is_commit).await?;
         debug!("RPC:\n{}", response);
 
-        if self.parse_replies {
-            let reply: RpcReply = from_xml(&response)?;
-            if reply.has_errors() {
-                return Err(NetconfClientError::Netconf(reply));
-            }
+        let reply = match from_xml::<RpcReply>(&response) {
+            Ok(reply) => reply,
+            Err(err) if self.parse_replies => return Err(err),
+            Err(_) => return Ok(response),
+        };
+
+        if let Some(expected) = expected_message_id
+            && reply.message_id() != Some(expected)
+        {
+            // The mismatched message is already consumed; the real reply may
+            // still arrive and would be read as the next answer.
+            self.desynchronized = true;
+            return Err(NetconfClientError::MessageIdMismatch {
+                expected: expected.to_string(),
+                actual: reply.message_id().unwrap_or("<none>").to_string(),
+            });
+        }
+
+        if self.parse_replies && reply_is_failure(&reply, warnings_as_errors) {
+            return Err(NetconfClientError::Netconf(reply));
         }
         Ok(response)
     }
 
     #[cfg(feature = "tokio")]
-    async fn write_and_receive(&mut self, request: &str) -> NetconfClientResult<String> {
-        let Some(timeout) = self.timeout else {
-            return self.transport.write_and_receive(request).await;
-        };
-        match tokio::time::timeout(timeout, self.transport.write_and_receive(request)).await {
-            Ok(result) => result,
-            Err(_) => {
-                // The reply may still land and would be read as the answer to
-                // whatever is sent next.
-                self.desynchronized = true;
-                Err(NetconfClientError::Timeout { timeout })
+    async fn write_and_receive(
+        &mut self,
+        request: &str,
+        is_commit: bool,
+    ) -> NetconfClientResult<String> {
+        let result = if let Some(timeout) = self.timeout {
+            match tokio::time::timeout(timeout, self.transport.write_and_receive(request)).await {
+                Ok(result) => result,
+                Err(_) => {
+                    // The reply may still land and would be read as the answer to
+                    // whatever is sent next.
+                    self.desynchronized = true;
+                    return Err(NetconfClientError::Timeout { timeout });
+                }
             }
-        }
+        } else {
+            self.transport.write_and_receive(request).await
+        };
+        map_commit_eof(result, is_commit)
     }
 
     #[cfg(not(feature = "tokio"))]
-    async fn write_and_receive(&mut self, request: &str) -> NetconfClientResult<String> {
-        self.transport.write_and_receive(request).await
+    async fn write_and_receive(
+        &mut self,
+        request: &str,
+        is_commit: bool,
+    ) -> NetconfClientResult<String> {
+        map_commit_eof(self.transport.write_and_receive(request).await, is_commit)
     }
+}
+
+fn reply_is_failure(reply: &RpcReply, warnings_as_errors: bool) -> bool {
+    reply.has_errors() || (warnings_as_errors && reply.has_warnings())
+}
+
+fn map_commit_eof(
+    result: NetconfClientResult<String>,
+    is_commit: bool,
+) -> NetconfClientResult<String> {
+    match result {
+        Err(err) if is_commit && err.is_unexpected_eof() => Err(NetconfClientError::CommitUnknown),
+        other => other,
+    }
+}
+
+fn request_message_id(xml: &str) -> Option<String> {
+    for key in ["message-id=\"", "message-id='"] {
+        if let Some(start) = xml.find(key) {
+            let rest = &xml[start + key.len()..];
+            let quote = key.chars().next_back()?;
+            if let Some(end) = rest.find(quote) {
+                let id = &rest[..end];
+                if !id.is_empty() {
+                    return Some(id.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// True when the document contains a `<commit>` or `<commit-configuration>`.
+///
+/// `<cancel-commit>` and `<commit-id>` do not match: their local names differ.
+fn request_is_commit(xml: &str) -> bool {
+    let mut rest = xml;
+    while let Some(idx) = rest.find('<') {
+        rest = &rest[idx + 1..];
+        if rest.starts_with('!') || rest.starts_with('?') || rest.starts_with('/') {
+            continue;
+        }
+        let name_end = rest
+            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .unwrap_or(rest.len());
+        let name = &rest[..name_end];
+        let local = name.rsplit(':').next().unwrap_or(name);
+        if local == "commit" || local == "commit-configuration" {
+            return true;
+        }
+    }
+    false
 }
 
 impl Drop for Connection {
@@ -363,6 +512,7 @@ impl Drop for Connection {
 
 #[cfg(test)]
 mod tests {
+    use super::{request_is_commit, request_message_id};
     use crate::message::capability_id;
     use crate::{CANDIDATE_CAP, URL_CAP};
 
@@ -373,5 +523,33 @@ mod tests {
             capability_id(&format!("{URL_CAP}?scheme=http,ftp,file")),
             URL_CAP
         );
+    }
+
+    #[test]
+    fn request_message_id_reads_double_and_single_quotes() {
+        assert_eq!(
+            request_message_id(r#"<rpc message-id="abc-123"><get/></rpc>"#).as_deref(),
+            Some("abc-123")
+        );
+        assert_eq!(
+            request_message_id("<rpc message-id='x'><get/></rpc>").as_deref(),
+            Some("x")
+        );
+        assert_eq!(request_message_id("<rpc><get/></rpc>"), None);
+    }
+
+    #[test]
+    fn request_is_commit_matches_commit_and_junos_not_cancel() {
+        assert!(request_is_commit("<rpc><commit/></rpc>"));
+        assert!(request_is_commit(
+            r#"<rpc><nc:commit xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0"/></rpc>"#
+        ));
+        assert!(request_is_commit("<rpc><commit-configuration/></rpc>"));
+        assert!(request_is_commit("<rpc><commit confirmed/></rpc>"));
+        assert!(!request_is_commit("<rpc><cancel-commit/></rpc>"));
+        assert!(!request_is_commit(
+            "<rpc><get><commit-id>1</commit-id></get></rpc>"
+        ));
+        assert!(!request_is_commit("<rpc><get/></rpc>"));
     }
 }

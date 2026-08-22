@@ -29,13 +29,13 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
             params,
             830,
             cfg.inner.ssh_config.clone(),
-        )?;
+        )?
+        .strict_host_key(cfg.inner.strict_host_key);
         let start_time = Instant::now();
         let cmd_clone = cmd.clone();
         let cfg_clone = cfg.clone();
         let handle: JoinHandle<NetconfClientResult<()>> = tokio::spawn(async move {
-            let session = host.connect_ssh().await?;
-            let ssh_transport = SSHTransport::new_with_session(session).await?;
+            let ssh_transport = SSHTransport::connect(host.ssh_transport_config()?).await?;
             let mut connection = Connection::new(ssh_transport).await?;
             info!(target: &host.address, "Connected to host");
             debug!(
@@ -124,6 +124,13 @@ See '<cyan,bold>netconf help</> <cyan><<command>></>' for more information on a 
             global_opt("password", "Username for netconf connection")
                 .env("NETCONF_PASSWORD")
                 .hide_env(true),
+            Arg::new("strict-host-key-checking")
+                .long("strict-host-key-checking")
+                .help("Host-key check: accept-new (default), yes, or no")
+                .value_parser(["yes", "no", "accept-new"])
+                .num_args(0..=1)
+                .default_missing_value("yes")
+                .global(true),
         ])
         .subcommands(builtin())
         .subcommand(crate::commands::update::cli())

@@ -1062,6 +1062,7 @@ dependencies = [
  "time",
  "tokio",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1069,7 +1070,6 @@ name = "netconf-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-ssh2-lite",
  "clap",
  "color-print",
  "dirs",
@@ -1084,7 +1084,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "ssh2",
  "ssh2-config",
  "tar",
  "tempfile",

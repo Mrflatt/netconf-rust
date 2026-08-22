@@ -44,14 +44,18 @@ impl Transport for MemoryTransport {
 
 /// One step in a scripted device conversation.
 enum Step {
-    /// Read a request, then answer it.
+    /// Read a request, echo its `message-id` into the reply, then answer.
     Reply(String),
+    /// Read a request and answer with this XML untouched.
+    ReplyAsIs(String),
     /// Send an unsolicited message, e.g. a notification.
     Push(String),
     /// Switch to 1.1 chunked framing.
     Upgrade,
     /// Stay connected but never answer again.
     GoQuiet,
+    /// Read a request, then drop the pipe without answering.
+    EatAndClose,
 }
 
 /// A device that walks a script, framed the way it announced.
@@ -72,6 +76,15 @@ fn device(script: Vec<Step>) -> Device {
             match step {
                 Step::Reply(reply) => {
                     // Read the request first so the pipe cannot fill up.
+                    let Ok(request) = framer.read_async().await else {
+                        return;
+                    };
+                    let reply = echo_message_id(&request, &reply);
+                    if framer.write_async(&reply).await.is_err() {
+                        return;
+                    }
+                }
+                Step::ReplyAsIs(reply) => {
                     if framer.read_async().await.is_err()
                         || framer.write_async(&reply).await.is_err()
                     {
@@ -86,6 +99,10 @@ fn device(script: Vec<Step>) -> Device {
                 Step::Upgrade => framer.upgrade().await,
                 // Hold the stream open so the client waits rather than sees EOF.
                 Step::GoQuiet => std::future::pending::<()>().await,
+                Step::EatAndClose => {
+                    let _ = framer.read_async().await;
+                    return;
+                }
             }
         }
     });
@@ -125,6 +142,24 @@ fn hello(base_11: bool) -> String {
 }
 
 const OK_REPLY: &str = r#"<rpc-reply message-id="1" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"><ok/></rpc-reply>"#;
+
+fn echo_message_id(request: &str, reply: &str) -> String {
+    match (message_id_attr(request), message_id_attr(reply)) {
+        (Some(req), Some(rep)) if req != rep => reply.replacen(
+            &format!("message-id=\"{rep}\""),
+            &format!("message-id=\"{req}\""),
+            1,
+        ),
+        _ => reply.to_string(),
+    }
+}
+
+fn message_id_attr(xml: &str) -> Option<&str> {
+    let key = "message-id=\"";
+    let start = xml.find(key)? + key.len();
+    let end = xml[start..].find('"')?;
+    Some(&xml[start..start + end])
+}
 
 #[tokio::test]
 async fn hello_exchange_reports_session_and_capabilities() {
@@ -258,14 +293,160 @@ async fn url_datastore_keeps_its_ampersands_escaped() {
 
 #[tokio::test]
 async fn device_that_hangs_up_mid_session_reports_eof() {
-    // Only the hello is answered; the pipe closes afterwards.
+    // Only the hello is answered; the write of the next RPC hits a dead pipe.
     let device = device(vec![Step::Reply(hello(false))]);
+    let mut conn = Connection::new(device.transport).await.unwrap();
+
+    let err = conn.lock(Datastore::Candidate).await.unwrap_err();
+    assert!(
+        matches!(err, NetconfClientError::Io(_)),
+        "expected an I/O error once the device hung up, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn eof_after_commit_is_sent_is_commit_unknown() {
+    let mut script = handshake(false);
+    script.push(Step::EatAndClose);
+    let device = device(script);
     let mut conn = Connection::new(device.transport).await.unwrap();
 
     let err = conn.commit().await.unwrap_err();
     assert!(
+        matches!(err, NetconfClientError::CommitUnknown),
+        "expected CommitUnknown after EOF on the commit reply, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn eof_after_non_commit_is_io() {
+    let mut script = handshake(false);
+    script.push(Step::EatAndClose);
+    let device = device(script);
+    let mut conn = Connection::new(device.transport).await.unwrap();
+
+    let err = conn.lock(Datastore::Candidate).await.unwrap_err();
+    assert!(
         matches!(err, NetconfClientError::Io(_)),
-        "expected an I/O error once the device hung up, got {err:?}"
+        "expected an I/O error after EOF on a non-commit reply, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn reply_with_wrong_message_id_fails_and_desynchronizes() {
+    let stale = r#"<rpc-reply message-id="999" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"><ok/></rpc-reply>"#;
+    let mut script = handshake(true);
+    script.push(Step::ReplyAsIs(stale.to_string()));
+    let device = device(script);
+    let mut conn = Connection::new(device.transport).await.unwrap();
+
+    let err = conn.lock(Datastore::Candidate).await.unwrap_err();
+    match err {
+        NetconfClientError::MessageIdMismatch { expected, actual } => {
+            assert_eq!(expected, "1");
+            assert_eq!(actual, "999");
+        }
+        other => panic!("expected MessageIdMismatch, got {other:?}"),
+    }
+
+    let err = conn.lock(Datastore::Candidate).await.unwrap_err();
+    assert!(
+        matches!(err, NetconfClientError::SessionDesynchronized),
+        "expected desynchronized, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn warning_plus_ok_is_success() {
+    let warning = r#"<rpc-reply message-id="1" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <rpc-error>
+    <error-type>application</error-type>
+    <error-tag>operation-failed</error-tag>
+    <error-severity>warning</error-severity>
+    <error-message>statement not found</error-message>
+  </rpc-error>
+  <ok/>
+</rpc-reply>"#;
+    let mut script = handshake(true);
+    script.push(Step::Reply(warning.to_string()));
+    let device = device(script);
+    let mut conn = Connection::new(device.transport).await.unwrap();
+
+    let raw = conn.commit().await.unwrap();
+    assert!(raw.contains("statement not found"));
+}
+
+#[tokio::test]
+async fn warnings_as_errors_fails_a_warning_only_reply() {
+    let warning = r#"<rpc-reply message-id="1" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <rpc-error>
+    <error-type>application</error-type>
+    <error-tag>operation-failed</error-tag>
+    <error-severity>warning</error-severity>
+    <error-message>statement not found</error-message>
+  </rpc-error>
+  <ok/>
+</rpc-reply>"#;
+    let mut script = handshake(true);
+    script.push(Step::Reply(warning.to_string()));
+    let device = device(script);
+    let mut conn = Connection::new(device.transport).await.unwrap();
+    conn.set_warnings_as_errors(true);
+
+    let err = conn.commit().await.unwrap_err();
+    let NetconfClientError::Netconf(reply) = err else {
+        panic!("expected a NETCONF error, got {err:?}");
+    };
+    assert!(reply.has_warnings());
+    assert!(!reply.has_errors());
+}
+
+#[tokio::test]
+async fn raw_rpc_with_warnings_returns_them_even_when_warnings_are_errors() {
+    let warning = r#"<rpc-reply message-id="7" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <rpc-error>
+    <error-type>application</error-type>
+    <error-tag>operation-failed</error-tag>
+    <error-severity>warning</error-severity>
+    <error-message>statement not found</error-message>
+  </rpc-error>
+  <ok/>
+</rpc-reply>"#;
+    let mut script = handshake(true);
+    script.push(Step::Reply(warning.to_string()));
+    let device = device(script);
+    let mut conn = Connection::new(device.transport).await.unwrap();
+    conn.set_warnings_as_errors(true);
+
+    let xml =
+        r#"<rpc message-id="7" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"><commit/></rpc>"#;
+    let (raw, warnings) = conn.raw_rpc_with_warnings(xml).await.unwrap();
+    assert!(raw.contains("statement not found"));
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].error_tag, ErrorTag::OperationFailed);
+}
+
+#[tokio::test]
+async fn second_rpc_uses_the_next_integer_message_id() {
+    let mut script = handshake(true);
+    script.push(Step::Reply(OK_REPLY.to_string()));
+    script.push(Step::Reply(OK_REPLY.to_string()));
+    let device = device(script);
+    let mut conn = Connection::new(device.transport).await.unwrap();
+
+    conn.lock(Datastore::Candidate).await.unwrap();
+    conn.unlock(Datastore::Candidate).await.unwrap();
+
+    let sent = device.sent.lock().unwrap();
+    assert!(
+        sent[1].contains("message-id=\"1\""),
+        "first rpc:\n{}",
+        sent[1]
+    );
+    assert!(
+        sent[2].contains("message-id=\"2\""),
+        "second rpc:\n{}",
+        sent[2]
     );
 }
 

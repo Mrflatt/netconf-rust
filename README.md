@@ -17,7 +17,7 @@ Talk to routers and switches over SSH using the `netconf` subsystem. The library
 - RPCs: `<get>`, `<get-config>`, `<edit-config>`, `<copy-config>`, `<delete-config>`, `<lock>` / `<unlock>`, `<validate>`, `<commit>` / confirmed-commit / `<cancel-commit>`, `<discard-changes>`, `<close-session>`, `<kill-session>`, raw RPC
 - Event notifications via `<create-subscription>` ([RFC 5277](https://www.rfc-editor.org/rfc/rfc5277.html))
 - Subtree filters and `with-defaults` ([RFC 6243](https://www.rfc-editor.org/rfc/rfc6243.html))
-- CLI with parallel multi-host runs, OpenSSH config, ssh-agent, and single-hop `ProxyJump`
+- CLI with parallel multi-host runs, OpenSSH config, ssh-agent, and `ProxyJump`
 
 ## Crates
 
@@ -65,12 +65,14 @@ netconf-cli update --check  # report only
 ```rust
 use netconf_async::connection::Connection;
 use netconf_async::message::{Datastore, Filter};
-use netconf_async::transport::ssh::SSHTransport;
+use netconf_async::transport::ssh::{HostKeyPolicy, SshAuth, SshConfig, SSHTransport};
 
 #[tokio::main]
 async fn main() -> netconf_async::error::NetconfClientResult<()> {
-    let transport =
-        SSHTransport::new_with_user_auth("192.0.2.10:830", "netconf", "secret").await?;
+    let transport = SSHTransport::connect(
+        SshConfig::new("192.0.2.10", 830, "netconf", SshAuth::password("secret"))
+            .host_key(HostKeyPolicy::Fingerprint("SHA256:base64fingerprint".into())),
+    ).await?;
     let mut conn = Connection::new(transport).await?;
 
     let running = conn.get_config(Datastore::Running, None, None).await?;
@@ -145,9 +147,9 @@ From the workspace without installing, prefix the same arguments with `cargo run
 
 ### Auth and SSH config
 
-Resolution order for user: `--username` / `NETCONF_USERNAME`, then `User` from `~/.ssh/config`. Password is `--password` / `NETCONF_PASSWORD`. If no password is given, the CLI walks identities from `ssh-agent`.
+Resolution order for user: `--username` / `NETCONF_USERNAME`, then `User` from `~/.ssh/config`. Password is `--password` / `NETCONF_PASSWORD`. If no password is given, the first `IdentityFile` is used, otherwise the CLI walks identities from `ssh-agent`.
 
-`HostName`, `Port`, `User`, algorithms, compression, keepalives, and a **single** `ProxyJump` hop are read from `~/.ssh/config`. The jump host authenticates with the agent only — the device password is not reused.
+`HostName`, `Port`, `User`, `IdentityFile`, `Compression`, `TCPKeepAlive` + `ServerAliveInterval`, algorithm prefs (`Ciphers`, `KexAlgorithms`, `MACs`, `HostKeyAlgorithms`), `UserKnownHostsFile`, and `ProxyJump` (any number of hops) are read from `~/.ssh/config`. Each jump authenticates with its own `IdentityFile` or the agent — the device password is not reused. Host keys default to `accept-new`: unknown hosts are pinned into `UserKnownHostsFile` or `~/.ssh/known_hosts`, a later key change is rejected. `--strict-host-key-checking yes` rejects unknown hosts too. `--strict-host-key-checking no` accepts any key.
 
 ```sshconfig
 Host jump

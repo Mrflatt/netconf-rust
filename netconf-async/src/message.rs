@@ -177,7 +177,10 @@ pub struct Capabilities {
     capability: Vec<String>,
 }
 
-/// `<rpc>` envelope with a generated `message-id` ([RFC6241 4.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-4.1)).
+/// `<rpc>` envelope with a `message-id` ([RFC6241 4.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-4.1)).
+///
+/// [`Connection`](crate::connection::Connection) assigns a per-session
+/// monotonically increasing integer. Standalone construction defaults to `"1"`.
 #[derive(Debug, Serialize)]
 pub struct Rpc {
     #[serde(rename = "@message-id")]
@@ -189,18 +192,35 @@ pub struct Rpc {
 }
 
 impl Rpc {
-    /// Wrap `operation` and assign a UUID `message-id`.
+    /// Wrap `operation` with `message-id` `"1"`.
+    ///
+    /// [`Connection`](crate::connection::Connection) overwrites this with the
+    /// next session counter before sending.
     pub fn new_with_operation(operation: RpcOperation) -> Rpc {
+        Self::with_message_id(operation, "1")
+    }
+
+    /// Wrap `operation` with an explicit `message-id`.
+    pub fn with_message_id(operation: RpcOperation, message_id: impl Into<String>) -> Rpc {
         Rpc {
             xmlns: NETCONF_URN.to_string(),
-            message_id: Uuid::new_v4().to_string(),
+            message_id: message_id.into(),
             operation,
         }
+    }
+
+    pub(crate) fn set_message_id(&mut self, message_id: impl Into<String>) {
+        self.message_id = message_id.into();
     }
 
     /// `message-id` carried by this request.
     pub fn message_id(&self) -> &str {
         &self.message_id
+    }
+
+    /// True when this is a `<commit>` (including confirmed / persist confirm).
+    pub(crate) fn is_commit(&self) -> bool {
+        matches!(self.operation, RpcOperation::Commit(_))
     }
 }
 
@@ -850,19 +870,38 @@ pub struct RpcReply {
 }
 
 impl RpcReply {
-    /// True when the reply has `<ok>` and no `<rpc-error>`.
+    /// True when the reply has `<ok>` and no error-severity `<rpc-error>`.
+    ///
+    /// Warning-severity errors plus `<ok/>` still count as success.
     pub fn is_ok(&self) -> bool {
-        self.ok.is_some() && self.rpc_error.is_none()
+        self.ok.is_some() && !self.has_errors()
     }
 
-    /// True when the reply contains at least one `<rpc-error>`.
+    /// True when the reply contains at least one error-severity `<rpc-error>`.
+    ///
+    /// Warning-only replies return `false`. Unknown severities count as errors.
     pub fn has_errors(&self) -> bool {
-        self.rpc_error.is_some()
+        self.errors().iter().any(|err| err.is_error_severity())
     }
 
-    /// Every `<rpc-error>` in the reply, empty when the RPC succeeded.
+    /// True when the reply contains at least one warning-severity `<rpc-error>`.
+    pub fn has_warnings(&self) -> bool {
+        self.errors()
+            .iter()
+            .any(|err| err.error_severity == ErrorSeverity::Warning)
+    }
+
+    /// Every `<rpc-error>` in the reply, including warnings.
     pub fn errors(&self) -> &[Error] {
         self.rpc_error.as_deref().unwrap_or(&[])
+    }
+
+    /// Warning-severity `<rpc-error>` elements.
+    pub fn warnings(&self) -> Vec<&Error> {
+        self.errors()
+            .iter()
+            .filter(|err| err.error_severity == ErrorSeverity::Warning)
+            .collect()
     }
 
     /// `message-id` echoed from the request, if the device sent one.
@@ -884,7 +923,7 @@ impl Display for RpcReply {
 impl std::error::Error for RpcReply {}
 
 /// One `<rpc-error>` from a reply ([RFC6241 4.3](https://www.rfc-editor.org/rfc/rfc6241.html#section-4.3)).
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename = "rpc-error", rename_all = "kebab-case")]
 #[non_exhaustive]
 pub struct Error {
@@ -906,6 +945,15 @@ pub struct Error {
     /// `<error-info>`, protocol- or data-model-specific detail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_info: Option<ErrorInfo>,
+}
+
+impl Error {
+    /// True when `<error-severity>` is not `warning`.
+    ///
+    /// Unknown values fail closed and count as errors.
+    pub fn is_error_severity(&self) -> bool {
+        self.error_severity != ErrorSeverity::Warning
+    }
 }
 
 /// Builds an enum that round-trips through XML text and keeps unknown values.
@@ -1033,7 +1081,7 @@ open_enum!(
 );
 
 /// `<error-info>` detail ([RFC6241 4.3](https://www.rfc-editor.org/rfc/rfc6241.html#section-4.3)).
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub struct ErrorInfo {
@@ -1179,6 +1227,47 @@ mod tests {
 "#;
         let reply: RpcReply = from_str(reply).unwrap();
         assert!(reply.is_ok());
+    }
+
+    #[test]
+    fn warning_plus_ok_is_success_not_an_error() {
+        let xml = r#"<rpc-reply message-id="1" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <rpc-error>
+    <error-type>application</error-type>
+    <error-tag>operation-failed</error-tag>
+    <error-severity>warning</error-severity>
+    <error-message>statement not found</error-message>
+  </rpc-error>
+  <ok/>
+</rpc-reply>"#;
+        let reply: RpcReply = from_xml(xml).unwrap();
+        assert!(reply.is_ok());
+        assert!(!reply.has_errors());
+        assert!(reply.has_warnings());
+        assert_eq!(reply.warnings().len(), 1);
+        assert_eq!(reply.warnings()[0].error_tag, ErrorTag::OperationFailed);
+        assert_eq!(reply.errors().len(), 1);
+    }
+
+    #[test]
+    fn warning_and_error_is_still_an_error() {
+        let xml = r#"<rpc-reply message-id="1">
+  <rpc-error>
+    <error-type>application</error-type>
+    <error-tag>operation-failed</error-tag>
+    <error-severity>warning</error-severity>
+  </rpc-error>
+  <rpc-error>
+    <error-type>protocol</error-type>
+    <error-tag>lock-denied</error-tag>
+    <error-severity>error</error-severity>
+  </rpc-error>
+</rpc-reply>"#;
+        let reply: RpcReply = from_xml(xml).unwrap();
+        assert!(!reply.is_ok());
+        assert!(reply.has_errors());
+        assert!(reply.has_warnings());
+        assert_eq!(reply.warnings().len(), 1);
     }
 
     #[test]

@@ -29,12 +29,15 @@ Toolchain is `stable` from `rust-toolchain.toml` (includes `rustfmt`, `clippy`).
 
 ## Testing
 
-Tests live next to the code they cover, under `#[cfg(test)]`. There is no `tests/` directory.
+Unit tests live next to the code they cover, under `#[cfg(test)]`. Session-level tests against a scripted in-memory device live in `netconf-async/tests/session.rs`.
 
 | Crate | File | What |
 |---|---|---|
 | `netconf-async` | `src/message.rs` | Hello / RPC serialize, `RpcReply` deserialize |
+| `netconf-async` | `src/connection.rs` | `message-id` extract, commit-RPC detect |
+| `netconf-async` | `src/transport/ssh.rs` | `SshConfig` builder, host-key policy |
 | `netconf-async` | `src/framer/async_framer.rs` | 1.0 EOM + 1.1 chunked framing (`#[tokio::test]`) |
+| `netconf-async` | `tests/session.rs` | scripted device: hello, RPC, timeout, warnings, commit EOF |
 | `netconf-cli` | `src/cli.rs` | `cli().debug_assert()` |
 | `netconf-cli` | `src/config.rs` | ProxyJump / host:port / ssh_config parsing |
 | `netconf-cli` | `src/commands/builtin.rs` | XML file/dir load (`1-rpc.xml` name order) |
@@ -99,7 +102,7 @@ Implemented CLI subcommands: `get`, `get-config`, `edit`, `copy`, `commit`, `rpc
 - Rust **edition 2024**, workspace resolver **3**. `rust-version = "1.85"` on `netconf-async`; CI uses current stable.
 - Tokio 1 (multi-thread). Traits use `async-trait`.
 - XML via `quick-xml` + `serde` (derive feature). Substring search via `memchr`.
-- SSH: `async-ssh2-lite` (tokio) in the library; CLI also uses `ssh2` + `ssh2-config`.
+- SSH: `async-ssh2-lite` (tokio) inside the library only. CLI parses `~/.ssh/config` with `ssh2-config` and calls `SSHTransport::connect`.
 - Errors: `thiserror` → `NetconfClientError`, alias `NetconfClientResult<T>`.
 - CLI: clap 4 builder API (not derive on command structs), `env_logger`, `color-print`.
 
@@ -125,8 +128,10 @@ Session flow:
 1. SSH connect, request subsystem `netconf`.
 2. Exchange `<hello>` with **1.0** framing (`]]>]]>`).
 3. If the server advertises `urn:ietf:params:netconf:base:1.1`, call `transport.upgrade()` → chunked framing (`\n#N\n...\n##\n`, RFC 6242).
-4. Each RPC is `write_and_receive`. Reply is parsed as `RpcReply`; any `<rpc-error>` becomes `NetconfClientError::Netconf`.
+4. Each RPC is `write_and_receive`. Reply is parsed as `RpcReply`; `message-id` must match (mismatch desynchronizes). Error-severity `<rpc-error>` becomes `NetconfClientError::Netconf`. Warning-only is success unless `set_warnings_as_errors(true)`. EOF after `<commit>` / `<commit-configuration>` is `CommitUnknown` — thread `is_commit` through the send, never a session flag.
 5. `close_session` sends the RPC and then closes the transport. `Drop` cannot await I/O, so it only warns when the session is still open.
+
+`SSHTransport::connect(SshConfig)` owns TCP, auth (`SshAuth::{Password,Agent,KeyFile}`), ProxyJump chain (`SshConfig::jump` appends hops), host-key policy (`RejectAll` default, `Fingerprint`, `KnownHosts`, `AcceptAll` lab opt-in), and session knobs (`SshSessionOpts`: compression, keepalive, kex/cipher/mac prefs). Each hop is a loopback `direct-tcpip` tunnel — do not wrap the channel as a socket. Do not leak `AsyncSession` or `async_ssh2_lite::Error` (`NetconfClientError::Ssh` is a `String`). CLI maps `IdentityFile`. Host keys default to `accept-new` (pin unknown, reject changed). `--strict-host-key-checking` / `StrictHostKeyChecking`: `yes`, `accept-new`, `no`.
 
 `Connection::set_parse_replies(false)` skips the reply parse and returns raw XML.
 `Connection::set_timeout` bounds one RPC; on timeout the session is marked
@@ -185,7 +190,7 @@ pub async fn get_config(&mut self, ds: &str, f: Option<String>) -> Result<String
 - Never edit `target/`. Never hand-edit `Cargo.lock` except via `cargo` when changing deps.
 - Never disable rustfmt, clippy, or hooks. Never add `#[allow]` to silence a real warning you introduced.
 - There is no TLS transport. Do not add `transport/tls.rs` or pretend TLS works.
-- Do not implement TLS transport, standalone lock/unlock/delete CLI commands, or multi-hop ProxyJump unless asked. CLI ProxyJump supports **one** hop; jump auth is ssh-agent only (device password is not reused).
+- Do not implement TLS transport or standalone lock/unlock/delete CLI commands unless asked. Jump auth is IdentityFile or agent (device password is not reused).
 - Do not bump crate versions or publish. release-please opens the release PR and tags on merge.
 - Do not rewrite working serialize/framer tests to “simplify” them.
 - Filter files are subtree XML. `Filter::subtree` is infallible and passes the XML through verbatim; it must never panic on caller input.

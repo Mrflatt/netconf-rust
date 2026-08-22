@@ -30,12 +30,14 @@ netconf-async = { version = "0.1", features = ["vendored-openssl"] }
 ```rust
 use netconf_async::connection::Connection;
 use netconf_async::message::{Datastore, Filter};
-use netconf_async::transport::ssh::SSHTransport;
+use netconf_async::transport::ssh::{HostKeyPolicy, SshAuth, SshConfig, SSHTransport};
 
 #[tokio::main]
 async fn main() -> netconf_async::error::NetconfClientResult<()> {
-    let transport =
-        SSHTransport::new_with_user_auth("192.0.2.10:830", "netconf", "secret").await?;
+    let transport = SSHTransport::connect(
+        SshConfig::new("192.0.2.10", 830, "netconf", SshAuth::password("secret"))
+            .host_key(HostKeyPolicy::Fingerprint("SHA256:base64fingerprint".into())),
+    ).await?;
     let mut conn = Connection::new(transport).await?;
 
     let running = conn.get_config(Datastore::Running, None, None).await?;
@@ -57,9 +59,10 @@ the server advertises `urn:ietf:params:netconf:base:1.1`. Call `close_session`
 when you are done: a clean shutdown has to await I/O, which `Drop` cannot do, so
 dropping an open session only logs a warning.
 
-Password auth is the short path. For ssh-agent or key files, build an
-`async_ssh2_lite::AsyncSession`, authenticate it, then wrap it with
-`SSHTransport::new_with_session`.
+`SSHTransport::connect` takes `SshAuth` (password, agent, or key file) and an
+optional ProxyJump chain. Host-key policy defaults to `RejectAll`; pin a
+fingerprint with `HostKeyPolicy::Fingerprint` or an OpenSSH file with
+`HostKeyPolicy::KnownHosts` / `HostKeyPolicy::AcceptNew`.
 
 A custom byte pipe implements [`Transport`](https://docs.rs/netconf-async/latest/netconf_async/transport/trait.Transport.html)
 and is passed to `Connection::new` the same way.
@@ -70,8 +73,10 @@ and is passed to `Connection::new` the same way.
 2. Exchange `<hello>` with **1.0** framing (`]]>]]>`).
 3. If the server advertises `:base:1.1`, call `transport.upgrade()` → chunked
    framing (`\n#N\n...\n##\n`, [RFC 6242](https://www.rfc-editor.org/rfc/rfc6242.html)).
-4. Each RPC is `write_and_receive`. The reply is parsed as `RpcReply`; any
-   `<rpc-error>` becomes `NetconfClientError::Netconf`.
+4. Each RPC is `write_and_receive`. The reply is parsed as `RpcReply`; the
+   `message-id` must match. Error-severity `<rpc-error>` becomes
+   `NetconfClientError::Netconf`. Warning-only replies succeed unless
+   `set_warnings_as_errors(true)`. EOF after `<commit>` is `CommitUnknown`.
 5. `close_session` ends the session and tears the transport down.
 
 `Connection::set_parse_replies(false)` returns the device's XML untouched and

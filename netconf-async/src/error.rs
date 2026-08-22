@@ -16,8 +16,8 @@ pub enum NetconfClientError {
     /// SSH handshake, auth, or subsystem error.
     #[cfg(feature = "ssh")]
     #[cfg_attr(docsrs, doc(cfg(feature = "ssh")))]
-    #[error(transparent)]
-    Ssh(#[from] async_ssh2_lite::Error),
+    #[error("{0}")]
+    Ssh(String),
     /// XML serialize or deserialize failure.
     #[error(transparent)]
     SerializingFailure(#[from] quick_xml::DeError),
@@ -67,6 +67,37 @@ pub enum NetconfClientError {
     /// An RPC was attempted after a timeout left the session out of sync.
     #[error("session is out of sync after an earlier timeout")]
     SessionDesynchronized,
+    /// Reply `message-id` did not match the request ([RFC6241 4.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-4.1)).
+    ///
+    /// The mismatched message has been consumed, so the real reply may still
+    /// be in flight. The session is left unusable.
+    #[error("rpc-reply message-id mismatch: expected {expected}, got {actual}")]
+    MessageIdMismatch {
+        /// `message-id` sent on the request.
+        expected: String,
+        /// `message-id` on the reply, or `<none>` if the device omitted it.
+        actual: String,
+    },
+    /// Connection dropped after `<commit>` / `<commit-configuration>` was sent.
+    ///
+    /// The device may already have applied the change. This is not a clean
+    /// I/O error — verify device state before retrying.
+    #[error(
+        "commit status unknown: connection lost after sending <commit>; the device may have committed — verify device state"
+    )]
+    CommitUnknown,
+    /// Server host key was rejected by the configured [`crate::transport::ssh::HostKeyPolicy`].
+    #[cfg(feature = "ssh")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "ssh")))]
+    #[error("SSH host key for {host} rejected ({reason}); server presented {fingerprint}")]
+    HostKeyRejected {
+        /// Host whose key was checked.
+        host: String,
+        /// SHA-256 fingerprint the server presented (`SHA256:…`).
+        fingerprint: String,
+        /// Why the policy rejected it.
+        reason: String,
+    },
     /// Anything that does not fit the other variants.
     #[error("{0}")]
     Other(String),
@@ -76,5 +107,10 @@ impl NetconfClientError {
     /// Wrap an arbitrary message as [`NetconfClientError::Other`].
     pub fn new(msg: impl Into<String>) -> Self {
         NetconfClientError::Other(msg.into())
+    }
+
+    /// True when the transport hit EOF mid-read.
+    pub(crate) fn is_unexpected_eof(&self) -> bool {
+        matches!(self, Self::Io(err) if err.kind() == std::io::ErrorKind::UnexpectedEof)
     }
 }
