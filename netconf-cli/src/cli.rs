@@ -41,7 +41,9 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
             debug!(
                 target: &host.address,
                 "Started Netconf session with session-id: {}",
-                connection.session_id()
+                connection
+                    .session_id()
+                    .map_or_else(|| "unknown".to_string(), |id| id.to_string())
             );
 
             if let Some(result) = builtin_exec(&cmd_clone, &mut connection, &cfg_clone.inner).await
@@ -51,9 +53,7 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
                     Err(e) => Err(e),
                 }
             } else {
-                Err(NetconfClientError::Anyhow(anyhow::Error::msg(
-                    "Unknown command",
-                )))
+                Err(NetconfClientError::new("Unknown command"))
             }?;
 
             info!(target: &host.address, "Operation took: {:.3}s", start_time.elapsed().as_secs_f32());

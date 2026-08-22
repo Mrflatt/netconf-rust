@@ -1021,12 +1021,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "memmem"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a64a92489e2744ce060c349162be1c5f33c6969234104dbd99ddb5feb08b8c15"
-
-[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1057,15 +1051,13 @@ dependencies = [
 name = "netconf-async"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-ssh2-lite",
  "async-trait",
  "log",
- "memmem",
+ "memchr",
  "pretty_assertions",
  "quick-xml",
  "serde",
- "serde_derive",
  "thiserror",
  "time",
  "tokio",
