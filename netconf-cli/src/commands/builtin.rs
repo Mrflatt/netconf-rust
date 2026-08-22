@@ -3,7 +3,8 @@ use crate::config::Config;
 use clap::builder::{IntoResettable, ValueParser};
 use clap::{Arg, ArgMatches, Command, ValueHint};
 use netconf_async::connection::Connection;
-use netconf_async::error::NetconfClientResult;
+use netconf_async::error::{NetconfClientError, NetconfClientResult};
+use netconf_async::message::Filter;
 
 pub fn builtin() -> Vec<Command> {
     vec![get::cli(), get_config::cli(), notification::cli()]
@@ -46,6 +47,18 @@ pub(crate) fn values_of<'a, T: Clone + Send + Sync + 'static>(
     args: &'a ArgMatches,
 ) -> Vec<&'a T> {
     args.get_many::<T>(name).unwrap_or_default().collect()
+}
+
+pub(crate) fn filter_from_args(args: &ArgMatches) -> NetconfClientResult<Option<Filter>> {
+    match value_of_if_exists::<String>("filter", args) {
+        Some(path) => {
+            let content = std::fs::read_to_string(path).map_err(|err| {
+                NetconfClientError::new(format!("failed to read filter '{path}': {err}"))
+            })?;
+            Ok(Some(Filter::subtree(&content)))
+        }
+        None => Ok(None),
+    }
 }
 
 pub(super) fn arg(

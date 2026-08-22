@@ -1,4 +1,4 @@
-use crate::commands::builtin::{arg, value_of};
+use crate::commands::builtin::{arg, filter_from_args, value_of};
 use crate::config::Config;
 use clap::{Command, ValueHint, arg};
 use log::{error, info};
@@ -59,12 +59,13 @@ pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()
         Ok(())
     } else {
         let stream = value_of::<String>("stream", args);
+        let filter = filter_from_args(args)?;
         let (tx, mut rx) = channel::<String>(1);
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 info!("Notification:\n{}", msg);
             }
         });
-        conn.notification(tx, Some(stream), None).await
+        conn.notification(tx, Some(stream), filter, None).await
     }
 }
