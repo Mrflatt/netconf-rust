@@ -1,4 +1,4 @@
-use crate::commands::builtin::{arg, value_of, value_of_if_exists};
+use crate::commands::builtin::{arg, filter_from_args, value_of, value_of_if_exists};
 use crate::config::Config;
 use clap::{Command, ValueHint};
 use log::{error, info};
@@ -55,7 +55,8 @@ pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()
     let with_defaults = value_of_if_exists::<String>("with-defaults", &cfg.args)
         .map(|value| WithDefaultsValue::from_str(value).unwrap());
     let source = Datastore::from_str(source)?;
-    match conn.get_config(source, None, with_defaults).await {
+    let filter = filter_from_args(&cfg.args)?;
+    match conn.get_config(source, filter, with_defaults).await {
         Ok(resp) => {
             info!("Response:\n{}", resp);
         }
