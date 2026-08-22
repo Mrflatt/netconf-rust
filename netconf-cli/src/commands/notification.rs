@@ -1,6 +1,6 @@
 use crate::commands::builtin::{arg, value_of};
 use crate::config::Config;
-use clap::{arg, Command, ValueHint};
+use clap::{Command, ValueHint, arg};
 use log::{error, info};
 use netconf_async::connection::Connection;
 use netconf_async::error::NetconfClientResult;

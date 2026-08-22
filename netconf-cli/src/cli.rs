@@ -1,15 +1,15 @@
 use crate::commands::builtin::{builtin, builtin_exec};
 use crate::config::{CliConfig, Host};
 use clap::{
-    arg, crate_authors, crate_description, crate_name, crate_version, Arg, ArgAction, Command,
+    Arg, ArgAction, Command, arg, crate_authors, crate_description, crate_name, crate_version,
 };
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use log::{debug, error, info};
 use netconf_async::connection::Connection;
 use netconf_async::error::{NetconfClientError, NetconfClientResult};
 use netconf_async::transport::ssh::SSHTransport;
-use ssh2_config::HostParams;
+use ssh2_config::{DefaultAlgorithms, HostParams};
 use std::time::Instant;
 use tokio::task::JoinHandle;
 
@@ -20,7 +20,7 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
         let params = if let Some(ssh_config) = &cfg.inner.ssh_config {
             ssh_config.query(addr)
         } else {
-            HostParams::default()
+            HostParams::new(&DefaultAlgorithms::default())
         };
         let host = Host::new(addr, &cfg.inner.username, &cfg.inner.password, params)?;
         let start_time = Instant::now();
