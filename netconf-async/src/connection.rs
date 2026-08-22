@@ -133,10 +133,11 @@ impl Connection {
         &mut self,
         sender: Sender<String>,
         stream: Option<&str>,
+        filter: Option<Filter>,
         duration: Option<Duration>,
     ) -> NetconfClientResult<()> {
         let notification = Rpc::new_with_operation(RpcOperation::new_create_subscription(
-            stream, None, duration,
+            stream, filter, duration,
         ));
         self.run_rpc(notification).await?;
         self.run_notification_loop(sender).await
