@@ -23,15 +23,16 @@ pub async fn builtin_exec(
     cmd: &str,
     conn: &mut Connection,
     args: &Config,
+    host: &str,
 ) -> Option<NetconfClientResult<()>> {
     let f = match cmd {
-        "get" => get::exec(args, conn).await,
-        "get-config" => get_config::exec(args, conn).await,
+        "get" => get::exec(args, conn, host).await,
+        "get-config" => get_config::exec(args, conn, host).await,
         "edit" => edit::exec(args, conn).await,
-        "copy" => copy::exec(args, conn).await,
+        "copy" => copy::exec(args, conn, host).await,
         "commit" => commit::exec(args, conn).await,
-        "rpc" => rpc::exec(args, conn).await,
-        "notification" => notification::exec(args, conn).await,
+        "rpc" => rpc::exec(args, conn, host).await,
+        "notification" => notification::exec(args, conn, host).await,
         _ => return None,
     };
     Some(f)

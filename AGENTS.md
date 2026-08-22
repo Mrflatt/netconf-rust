@@ -39,6 +39,7 @@ Unit tests live next to the code they cover, under `#[cfg(test)]`. Session-level
 | `netconf-cli` | `src/cli.rs` | `cli().debug_assert()` |
 | `netconf-cli` | `src/config.rs` | ProxyJump / host:port / ssh_config parsing |
 | `netconf-cli` | `src/commands/builtin.rs` | XML file/dir load (`1-rpc.xml` name order) |
+| `netconf-cli` | `src/output.rs` | `--format` parse, XML pretty/unescape, XML→JSON, `--output-dir` |
 | `netconf-cli` | `src/update.rs` | tag parse, asset match, GitHub digest, archive extract, poller |
 
 - Add a test for every new RPC variant, framer edge, host-string parse, or XML file/dir loader.
@@ -77,6 +78,7 @@ cargo test -p netconf-async test_deserialize_rpc_reply -- --nocapture
         ├── main.rs
         ├── cli.rs             # clap root + parallel host fan-out
         ├── config.rs          # ~/.ssh/config, ProxyJump, Host
+        ├── output.rs          # --format / --output-dir reply emit
         ├── update.rs          # GitHub release poller + self-replace
         └── commands/
             ├── builtin.rs     # dispatch + filter/xml file-or-dir helper

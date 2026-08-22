@@ -74,7 +74,7 @@ pub fn cli() -> Command {
         ])
 }
 
-pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
+pub async fn exec(cfg: &Config, conn: &mut Connection, host: &str) -> NetconfClientResult<()> {
     let args = &cfg.args;
     let get_streams = value_of::<bool>("get", args);
     if *get_streams {
@@ -82,14 +82,12 @@ pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()
             r#"<netconf xmlns="urn:ietf:params:xml:ns:netmod:notification"><streams/></netconf>"#,
         );
         match conn.get(Some(filter), None).await {
-            Ok(resp) => {
-                info!("Available notification streams:\n{}", resp);
-            }
+            Ok(resp) => cfg.output.emit(host, &resp),
             Err(err) => {
                 error!("Get error: {}", err);
+                Err(err)
             }
-        };
-        Ok(())
+        }
     } else {
         let stream = value_of::<String>("stream", args);
         let filter = filter_from_args(cfg)?;
@@ -106,9 +104,13 @@ pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()
             None => (start_time, stop_time),
         };
         let (tx, mut rx) = channel::<String>(1);
+        let output = cfg.output.clone();
+        let host = host.to_string();
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                info!("Notification:\n{}", msg);
+                if let Err(err) = output.emit(&host, &msg) {
+                    error!("failed to write notification: {err}");
+                }
             }
         });
         // The library streams until the device stops or the future is dropped,

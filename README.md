@@ -103,8 +103,8 @@ Other methods on `Connection`: `edit_config`, `copy_config`, `delete_config`, `l
 ## CLI
 
 ```bash
-# running config
-netconf-cli get-config --host router.example --username netconf
+# running config (logs on stderr, reply on stdout)
+netconf-cli get-config --host router.example --username netconf > running.xml
 
 # candidate + subtree filter + with-defaults
 netconf-cli get-config \
@@ -133,8 +133,12 @@ netconf-cli rpc --host router.example --username netconf -f custom-rpc.xml
 netconf-cli notification --host router.example --username netconf
 netconf-cli notification --host router.example --username netconf --get   # list streams
 
-# several devices in parallel
-netconf-cli get-config --host r1.example,r2.example --username netconf
+# several devices in parallel (one file per host)
+netconf-cli get-config --host r1.example,r2.example --output-dir ./configs
+
+# pretty XML or JSON
+netconf-cli get-config --host router.example --format pretty
+netconf-cli get-config --host router.example --format json,pretty > running.json
 
 # self-update from GitHub Releases
 netconf-cli update
@@ -180,11 +184,26 @@ netconf-cli get-config --host router
 | `NETCONF_RELEASE_REPO` | GitHub `owner/repo` for `update` (default `Mrflatt/netconf-rust`) |
 | `NETCONF_GITHUB_TOKEN` / `GH_TOKEN` | Optional token for GitHub API rate limits |
 
+### Output
+
+Replies go to **stdout**. Logs go to **stderr**, so `> reply.xml` is just the document.
+
+| Flag | Effect |
+|---|---|
+| `--format xml` | raw reply (default) |
+| `--format pretty` | indented XML |
+| `--format pretty,unescape` | decode entities, then pretty-print |
+| `--format json` | XML → JSON |
+| `--format json,pretty` | indented JSON |
+| `--output-dir DIR` | write `DIR/{host}.xml` (or `.json`) instead of stdout |
+
+`--format` is comma-separated tokens: one codec (`xml` or `json`) plus `pretty` and/or `unescape`. More codecs can be added later without a new flag.
+
 ### Logging
 
 | Flag | Effect |
 |---|---|
-| _(none)_ | info, library quiet |
+| _(none)_ | info on stderr, library quiet |
 | `-v` | debug, library quiet (no russh / ssh2_config) |
 | `-vv` | debug + connection + russh / ssh2_config |
 | `-vvv` | debug including RPC frames |

@@ -1,7 +1,7 @@
 use crate::commands::builtin::{arg, xml_inputs_from_args};
 use crate::config::Config;
 use clap::{Command, ValueHint};
-use log::{debug, error, info};
+use log::{debug, error};
 use netconf_async::connection::Connection;
 use netconf_async::error::{NetconfClientError, NetconfClientResult};
 
@@ -27,8 +27,8 @@ pub fn cli() -> Command {
         )])
 }
 
-pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
-    match run(cfg, conn).await {
+pub async fn exec(cfg: &Config, conn: &mut Connection, host: &str) -> NetconfClientResult<()> {
+    match run(cfg, conn, host).await {
         Ok(()) => Ok(()),
         Err(err) => {
             error!("Rpc error: {}", err);
@@ -37,7 +37,7 @@ pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()
     }
 }
 
-async fn run(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
+async fn run(cfg: &Config, conn: &mut Connection, host: &str) -> NetconfClientResult<()> {
     let files = xml_inputs_from_args("file", cfg)?;
     if files.is_empty() {
         return Err(NetconfClientError::new("rpc file required".to_string()));
@@ -46,7 +46,7 @@ async fn run(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
     for file in &files {
         debug!("Executing {}", file.name);
         let resp = conn.raw_rpc(&file.content).await?;
-        info!("Response from {}:\n{}", file.name, resp);
+        cfg.output.emit(host, &resp)?;
     }
     Ok(())
 }

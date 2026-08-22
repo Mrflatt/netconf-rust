@@ -1,7 +1,7 @@
 use crate::commands::builtin::{filter_from_args, value_of_if_exists};
 use crate::config::Config;
 use clap::{Arg, Command, ValueHint};
-use log::{error, info};
+use log::error;
 use netconf_async::connection::Connection;
 use netconf_async::error::NetconfClientResult;
 use netconf_async::message::WithDefaultsValue;
@@ -33,15 +33,12 @@ pub fn cli() -> Command {
         ])
 }
 
-pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
+pub async fn exec(cfg: &Config, conn: &mut Connection, host: &str) -> NetconfClientResult<()> {
     let with_defaults = value_of_if_exists::<String>("defaults", &cfg.args)
         .map(|value| WithDefaultsValue::from_str(value).unwrap());
     let filter = filter_from_args(cfg)?;
     match conn.get(filter, with_defaults).await {
-        Ok(resp) => {
-            info!("Response:\n{}", resp);
-            Ok(())
-        }
+        Ok(resp) => cfg.output.emit(host, &resp),
         Err(err) => {
             error!("Get error: {}", err);
             Err(err)

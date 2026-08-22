@@ -7,6 +7,7 @@ use netconf_async::error::NetconfClientResult;
 mod cli;
 mod commands;
 mod config;
+mod output;
 mod update;
 
 fn quiet_libraries(builder: &mut Builder) {
@@ -36,7 +37,7 @@ fn init_logging(verbosity: &u8) {
             quiet_libraries(&mut builder);
         }
     };
-    builder.target(Target::Stdout);
+    builder.target(Target::Stderr);
     builder.init();
 }
 

@@ -1674,6 +1674,7 @@ dependencies = [
  "futures",
  "log",
  "netconf-async",
+ "quick-xml",
  "reqwest",
  "self-replace",
  "semver",

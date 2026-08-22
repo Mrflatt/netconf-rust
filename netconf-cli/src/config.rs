@@ -1,4 +1,5 @@
 use crate::commands::builtin::{value_of_if_exists, values_of};
+use crate::output::{Format, Output};
 use clap::ArgMatches;
 use dirs::home_dir;
 use log::{debug, error, warn};
@@ -29,6 +30,7 @@ pub struct Config {
     pub timeout: Option<Duration>,
     pub parallel: Option<usize>,
     pub stdin_xml: Option<String>,
+    pub output: Output,
 }
 
 impl CliConfig {
@@ -46,6 +48,10 @@ impl CliConfig {
             value_of_if_exists::<u64>("timeout", &args).map(|&secs| Duration::from_secs(secs));
         let parallel = value_of_if_exists::<u64>("parallel", &args).map(|&n| n as usize);
         let stdin_xml = capture_stdin_xml(&args)?;
+        let format = value_of_if_exists::<Format>("format", &args)
+            .cloned()
+            .unwrap_or_default();
+        let output_dir = value_of_if_exists::<String>("output-dir", &args).map(PathBuf::from);
         Ok(Self {
             inner: Arc::new(Config {
                 username,
@@ -57,6 +63,7 @@ impl CliConfig {
                 timeout,
                 parallel,
                 stdin_xml,
+                output: Output::new(format, output_dir),
             }),
         })
     }

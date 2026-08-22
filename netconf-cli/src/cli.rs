@@ -36,6 +36,7 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
             cfg.inner.ssh_config.clone(),
         )?
         .strict_host_key(cfg.inner.strict_host_key);
+        let addr = addr.clone();
         let start_time = Instant::now();
         let cmd_clone = cmd.clone();
         let cfg_clone = cfg.clone();
@@ -61,7 +62,8 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
                     .map_or_else(|| "unknown".to_string(), |id| id.to_string())
             );
 
-            if let Some(result) = builtin_exec(&cmd_clone, &mut connection, &cfg_clone.inner).await
+            if let Some(result) =
+                builtin_exec(&cmd_clone, &mut connection, &cfg_clone.inner, &addr).await
             {
                 result
             } else {
@@ -155,6 +157,17 @@ See '<cyan,bold>netconf help</> <cyan><<command>></>' for more information on a 
                 .help("Max concurrent hosts (default: all)")
                 .value_parser(clap::value_parser!(u64).range(1..))
                 .global(true),
+            Arg::new("format")
+                .long("format")
+                .help("Reply format: xml (default) or json, plus pretty, unescape (comma-separated)")
+                .value_parser(crate::output::parse_format)
+                .default_value("xml")
+                .global(true),
+            Arg::new("output-dir")
+                .long("output-dir")
+                .help("Write each host reply to DIR/{host}.{xml|json} instead of stdout")
+                .value_hint(clap::ValueHint::DirPath)
+                .global(true),
             Arg::new("strict-host-key-checking")
                 .long("strict-host-key-checking")
                 .help("Host-key check: accept-new (default), yes, or no")
@@ -197,4 +210,37 @@ fn timeout_and_parallel_flags() {
     let cfg = CliConfig::new(args).unwrap();
     assert_eq!(cfg.inner.timeout, Some(Duration::from_secs(15)));
     assert_eq!(cfg.inner.parallel, Some(3));
+}
+
+#[test]
+fn format_and_output_dir_flags() {
+    use crate::config::CliConfig;
+    use crate::output::{Format, FormatKind};
+
+    let mut matches = cli()
+        .try_get_matches_from([
+            "netconf",
+            "--host",
+            "192.0.2.10",
+            "--format",
+            "json,pretty",
+            "--output-dir",
+            "/tmp/replies",
+            "get-config",
+        ])
+        .unwrap();
+    let (_, args) = matches.remove_subcommand().unwrap();
+    let cfg = CliConfig::new(args).unwrap();
+    assert_eq!(
+        cfg.inner.output.format_for_test(),
+        &Format {
+            kind: FormatKind::Json,
+            pretty: true,
+            unescape: false,
+        }
+    );
+    assert_eq!(
+        cfg.inner.output.dir_for_test().unwrap().as_os_str(),
+        "/tmp/replies"
+    );
 }

@@ -15,6 +15,7 @@ flate2 = "1"
 futures = "0.3"
 log = { version = "0.4", features = ["std"] }
 netconf-async = { version = "0.1.0", path = "../netconf-async" }
+quick-xml = { version = "0.41", features = ["serialize"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 self-replace = "1"
 semver = "1"
