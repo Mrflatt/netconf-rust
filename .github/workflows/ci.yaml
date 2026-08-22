@@ -58,6 +58,7 @@ jobs:
         run: cargo update -p netconf-cli --locked
 
   test:
+    if: ${{ github.actor != 'github-actions[bot]' || !contains(github.event.pull_request.title, 'release') }}
     runs-on: ${{ matrix.os }}
     env:
       RUST_BACKTRACE: 1
@@ -109,3 +110,32 @@ jobs:
       # Git's MSYS perl is on PATH in bash and breaks OpenSSL Configure.
       - name: Run tests
         run: cargo test
+
+  release:
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    needs:
+      - rustfmt
+      - clippy
+      - lockfile
+      - test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: googleapis/release-please-action@v5
+        with:
+          skip-github-pull-request: true
+
+  release-pr:
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: googleapis/release-please-action@v5
+        with:
+          skip-github-release: true

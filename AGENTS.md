@@ -153,6 +153,6 @@ pub async fn get_config(&mut self, ds: &str, f: Option<String>) -> Result<String
 - Never disable rustfmt, clippy, or hooks. Never add `#[allow]` to silence a real warning you introduced.
 - `netconf-async/src/transport/tls.rs` is a zero-byte stub and is **not** `mod`ed. Do not `pub mod tls` or pretend TLS works.
 - Do not implement `edit` / `copy` / `rpc` CLI commands, TLS transport, or multi-hop ProxyJump unless asked. CLI ProxyJump supports **one** hop; jump auth is ssh-agent only (device password is not reused).
-- Do not bump crate versions or publish.
+- Do not bump crate versions or publish. release-please opens the release PR and tags on merge.
 - Do not rewrite working serialize/framer tests to “simplify” them.
 - Filter files are subtree XML. `Filter::subtree` unescapes `\"` sequences; keep that behavior.
