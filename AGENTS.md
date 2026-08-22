@@ -21,11 +21,8 @@ cargo update -p netconf-cli --locked
 cargo run -p netconf-cli -- --help
 ```
 
-Windows (matches CI):
-
-```bash
-cargo test --features openssl-on-win32,vendored-openssl,default
-```
+Windows CI is plain `cargo test` (libssh2 WinCNG). Do not enable
+`vendored-openssl` there — Git's MSYS perl breaks OpenSSL Configure.
 
 Toolchain is `stable` from `rust-toolchain.toml` (includes `rustfmt`, `clippy`). No `rustfmt.toml` / `clippy.toml` — rustfmt defaults, clippy `-D warnings`.
 

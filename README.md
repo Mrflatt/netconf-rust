@@ -83,8 +83,8 @@ Other methods on `Connection`: `validate`, `commit`, `confirmed_commit`, `kill_s
 | `tokio` | yes | runtime integration, notifications, `Drop` |
 | `async-ssh2-lite` | yes | `SSHTransport` |
 | `async-trait` | yes | `Transport` / `Framer` traits |
-| `vendored-openssl` | no | static OpenSSL (also used on Windows CI) |
-| `openssl-on-win32` | no | Windows OpenSSL |
+| `vendored-openssl` | no | static OpenSSL |
+| `openssl-on-win32` | no | OpenSSL instead of WinCNG on Windows |
 
 ## CLI
 
