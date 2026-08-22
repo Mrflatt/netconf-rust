@@ -1,16 +1,20 @@
 [package]
-name = "netconf"
+name = "netconf-cli"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["Lauri Huotari <flatlate@gmail.com>"]
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "Netconf cli tool written in Rust"
 
 [dependencies]
-netconf-rust = { version = "0.1.0", path = "../netconf-rust" }
-log = { version = "0.4.21", features = ["std"] }
-env_logger = { version = "0.11.3" }
-clap = { version = "4.5.4", features = ["derive", "env"] }
-ssh2 = "0.9"
-ssh2-config = "0.2"
-dirs = "5.0"
+anyhow = "1"
+async-ssh2-lite = { version = "0.5", features = ["tokio"] }
+clap = { version = "4", features = ["derive", "env", "cargo"] }
+color-print = "0.3"
+dirs = "6"
+env_logger = "0.11"
 futures = "0.3"
+log = { version = "0.4", features = ["std"] }
+netconf-async = { version = "0.1.0", path = "../netconf-async" }
+ssh2 = "0.9"
+ssh2-config = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
