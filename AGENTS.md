@@ -23,6 +23,7 @@ cargo run -p netconf-cli -- --help
 
 Windows CI is plain `cargo test` (libssh2 WinCNG). Do not enable
 `vendored-openssl` there — Git's MSYS perl breaks OpenSSL Configure.
+Linux x86_64 CI uses `--features vendored-openssl` to match release binaries.
 
 Toolchain is `stable` from `rust-toolchain.toml` (includes `rustfmt`, `clippy`). No `rustfmt.toml` / `clippy.toml` — rustfmt defaults, clippy `-D warnings`.
 
@@ -36,6 +37,7 @@ Tests live next to the code they cover, under `#[cfg(test)]`. There is no `tests
 | `netconf-async` | `src/framer/async_framer.rs` | 1.0 EOM + 1.1 chunked framing (`#[tokio::test]`) |
 | `netconf-cli` | `src/cli.rs` | `cli().debug_assert()` |
 | `netconf-cli` | `src/config.rs` | ProxyJump / host:port / ssh_config parsing |
+| `netconf-cli` | `src/update.rs` | tag parse, asset match, GitHub digest, archive extract, poller |
 
 - Add a test for every new RPC variant, framer edge, or host-string parse.
 - XML tests pin a fixed `message-id` and compare the full document with `pretty_assertions::assert_eq`.
@@ -54,6 +56,9 @@ cargo test -p netconf-async test_deserialize_rpc_reply -- --nocapture
 .
 ├── Cargo.toml                 # workspace, resolver = "3"
 ├── rust-toolchain.toml        # stable + rustfmt + clippy
+├── .github/workflows/
+│   ├── ci.yaml                # rustfmt, clippy, lockfile, test, release-please
+│   └── release-binaries.yaml  # build + upload netconf-cli archives to the GitHub release
 ├── netconf-async/             # library crate
 │   └── src/
 │       ├── lib.rs             # re-exports + NETCONF URN constants
@@ -70,16 +75,18 @@ cargo test -p netconf-async test_deserialize_rpc_reply -- --nocapture
         ├── main.rs
         ├── cli.rs             # clap root + parallel host fan-out
         ├── config.rs          # ~/.ssh/config, ProxyJump, Host
+        ├── update.rs          # GitHub release poller + self-replace
         └── commands/
             ├── builtin.rs     # dispatch + filter file helper
             ├── get.rs
             ├── get_config.rs
-            └── notification.rs
+            ├── notification.rs
+            └── update.rs      # update subcommand (no device session)
 ```
 
 Implemented `Connection` RPCs: `get`, `get-config`, `validate`, `commit`, `confirmed_commit`, `close_session`, `kill_session`, `notification` (`<create-subscription>`, RFC 5277).
 
-Implemented CLI subcommands: `get`, `get-config`, `notification`. The help template also lists `edit`, `copy`, `rpc` — those are **not** implemented. Do not document them as working. Do not add them unless asked.
+Implemented CLI subcommands: `get`, `get-config`, `notification`, `update`. The help template also lists `edit`, `copy`, `rpc` — those are **not** implemented. Do not document them as working. Do not add them unless asked.
 
 ## Stack
 
@@ -115,6 +122,16 @@ Session flow:
 `Connection::set_skip_serializing` skips reply parse and returns raw XML.
 
 Default NETCONF-over-SSH port is **830**. Jump hosts use **22**.
+
+## Releases
+
+Repo has immutable GitHub releases: a published release cannot gain or change assets. release-please therefore creates `netconf-cli-v*` as a **draft** (`draft` + `force-tag-creation` so the tag exists immediately). CI builds archives, uploads them to the draft, then publishes. After that the release is frozen. `netconf-async` has no binaries and is published immediately.
+
+`GITHUB_TOKEN` cannot trigger a second workflow, so binaries run in the same CI run. workflow_dispatch can finish a leftover draft; it cannot patch an already-published release.
+
+Assets: `netconf-cli-{version}-{target}.tar.gz`. Linux builds use `--features vendored-openssl`. Windows must not.
+
+`netconf update` polls `Mrflatt/netconf-rust` releases, ignores `netconf-async-*` tags, verifies GitHub's asset `digest`, then `self_replace`. It does **not** open a device session.
 
 ## Code style
 

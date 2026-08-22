@@ -7,6 +7,7 @@ use netconf_async::error::NetconfClientResult;
 mod cli;
 mod commands;
 mod config;
+mod update;
 
 fn init_logging(verbosity: &u8) {
     let mut builder = Builder::new();
@@ -44,8 +45,12 @@ async fn main() -> NetconfClientResult<()> {
 
     match args.remove_subcommand() {
         Some((cmd, args)) => {
-            let cli_config = CliConfig::new(args)?;
-            cli::exec(cmd.to_owned(), cli_config).await?;
+            if cmd == "update" {
+                commands::update::exec(&args).await?;
+            } else {
+                let cli_config = CliConfig::new(args)?;
+                cli::exec(cmd.to_owned(), cli_config).await?;
+            }
         }
         _ => {
             cli::cli().print_help()?;

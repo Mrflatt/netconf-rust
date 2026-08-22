@@ -74,6 +74,7 @@ jobs:
             os: ubuntu-latest
             rust: stable
             other: x86_64-unknown-linux-gnu
+            features: --features vendored-openssl
           - name: Linux aarch64 stable
             os: ubuntu-latest
             rust: stable
@@ -108,8 +109,9 @@ jobs:
         run: rustup component add rustfmt || echo "rustfmt not available"
       # Windows libssh2 uses WinCNG. vendored-openssl needs Strawberry Perl;
       # Git's MSYS perl is on PATH in bash and breaks OpenSSL Configure.
+      # Linux x86_64 matches the release binary: --features vendored-openssl.
       - name: Run tests
-        run: cargo test
+        run: cargo test ${{ matrix.features }}
 
   release:
     if: ${{ github.event_name != 'pull_request' }}
@@ -122,11 +124,27 @@ jobs:
       - clippy
       - lockfile
       - test
+    outputs:
+      cli_release: ${{ steps.release.outputs['netconf-cli--release_created'] }}
+      cli_tag: ${{ steps.release.outputs['netconf-cli--tag_name'] }}
+      cli_version: ${{ steps.release.outputs['netconf-cli--version'] }}
     steps:
       - uses: actions/checkout@v7
       - uses: googleapis/release-please-action@v5
+        id: release
         with:
           skip-github-pull-request: true
+
+  release-binaries:
+    needs: release
+    if: needs.release.outputs.cli_release == 'true'
+    uses: ./.github/workflows/release-binaries.yaml
+    with:
+      tag: ${{ needs.release.outputs.cli_tag }}
+      version: ${{ needs.release.outputs.cli_version }}
+    permissions:
+      contents: write
+    secrets: inherit
 
   release-pr:
     if: ${{ github.event_name != 'pull_request' }}
