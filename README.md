@@ -17,7 +17,7 @@ Talk to routers and switches over SSH using the `netconf` subsystem. The library
 - RPCs: `<get>`, `<get-config>`, `<edit-config>`, `<copy-config>`, `<delete-config>`, `<lock>` / `<unlock>`, `<validate>`, `<commit>` / confirmed-commit / `<cancel-commit>`, `<discard-changes>`, `<close-session>`, `<kill-session>`, raw RPC
 - Event notifications via `<create-subscription>` ([RFC 5277](https://www.rfc-editor.org/rfc/rfc5277.html))
 - Subtree filters and `with-defaults` ([RFC 6243](https://www.rfc-editor.org/rfc/rfc6243.html))
-- CLI with parallel multi-host runs, OpenSSH config, ssh-agent, and `ProxyJump`
+- CLI with parallel multi-host runs, OpenSSH config, ssh-agent, `ProxyJump`, inventory CSV, and XML templates
 
 ## Crates
 
@@ -135,6 +135,11 @@ netconf-cli notification --host router.example --username netconf --get   # list
 
 # several devices in parallel (one file per host)
 netconf-cli get-config --host r1.example,r2.example --output-dir ./configs
+netconf-cli get-config --host r1 --host r2 --output-dir ./configs
+
+# inventory CSV (@file) + Go-template subset, preview without SSH
+netconf-cli edit --host @hosts.csv --file sap.xml --dry-run
+netconf-cli edit --host @hosts.csv --file sap.xml --dry-run --output-dir ./rendered
 
 # pretty XML or JSON
 netconf-cli get-config --host router.example --format pretty
@@ -198,6 +203,16 @@ Replies go to **stdout**. Logs go to **stderr**, so `> reply.xml` is just the do
 | `--output-dir DIR` | write `DIR/{host}.xml` (or `.json`) instead of stdout |
 
 `--format` is comma-separated tokens: one codec (`xml` or `json`) plus `pretty` and/or `unescape`. More codecs can be added later without a new flag.
+
+### Inventory and templates
+
+`--host` takes a name, a comma-separated list, or `@file.csv`. Repeat the flag to mix them. `--delimiter` changes the CSV separator (default `,`).
+
+A header with `ip` or `host` turns extra columns into template variables. The same address on many rows becomes a slice; the template must `range`. A bare IP list (no header) is just hosts.
+
+`--file` / `--config` XML then understands a Go-template subset: `{{ .field }}`, `{{ env "NAME" }}`, `{{ range . }}` … `{{ end }}`, plus `{{-` / `-}}` trim. `--template` forces that parse when the inventory has no extra columns.
+
+`--dry-run` / `--dry-run=data` prints the rendered XML and does not connect. A later `session` mode may hello and print RPCs; it is not implemented yet.
 
 ### Logging
 

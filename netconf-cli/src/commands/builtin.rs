@@ -1,7 +1,10 @@
 use crate::commands::*;
 use crate::config::Config;
+use crate::inventory::{Target, Vars};
+use crate::template;
 use clap::builder::{IntoResettable, ValueParser};
 use clap::{Arg, ArgMatches, Command, ValueHint};
+use log::info;
 use netconf_async::connection::Connection;
 use netconf_async::error::{NetconfClientError, NetconfClientResult};
 use netconf_async::message::Filter;
@@ -23,19 +26,56 @@ pub async fn builtin_exec(
     cmd: &str,
     conn: &mut Connection,
     args: &Config,
-    host: &str,
+    target: &Target,
 ) -> Option<NetconfClientResult<()>> {
+    let host = target.address.as_str();
     let f = match cmd {
         "get" => get::exec(args, conn, host).await,
         "get-config" => get_config::exec(args, conn, host).await,
-        "edit" => edit::exec(args, conn).await,
-        "copy" => copy::exec(args, conn, host).await,
+        "edit" => edit::exec(args, conn, target).await,
+        "copy" => copy::exec(args, conn, target).await,
         "commit" => commit::exec(args, conn).await,
-        "rpc" => rpc::exec(args, conn, host).await,
+        "rpc" => rpc::exec(args, conn, target).await,
         "notification" => notification::exec(args, conn, host).await,
         _ => return None,
     };
     Some(f)
+}
+
+pub fn dry_run_data(cmd: &str, cfg: &Config, target: &Target) -> NetconfClientResult<()> {
+    match cmd {
+        "edit" => {
+            if value_of_if_exists::<String>("url", &cfg.args).is_some() {
+                return Err(NetconfClientError::new(
+                    "dry-run data requires --file, not --url".to_string(),
+                ));
+            }
+            emit_files("file", cfg, target)
+        }
+        "rpc" => emit_files("file", cfg, target),
+        "copy" => match xml_file_from_args("config", cfg, &target.vars)? {
+            Some(xml) => cfg.output.emit(&target.address, &xml),
+            None => {
+                info!("dry-run data: copy has no --config payload");
+                Ok(())
+            }
+        },
+        other => {
+            info!("dry-run data: no file payload for {other}");
+            Ok(())
+        }
+    }
+}
+
+fn emit_files(name: &str, cfg: &Config, target: &Target) -> NetconfClientResult<()> {
+    let files = xml_inputs_from_args(name, cfg, &target.vars)?;
+    if files.is_empty() {
+        return Err(NetconfClientError::new(format!("{name} required")));
+    }
+    for file in files {
+        cfg.output.emit(&target.address, &file.content)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn value_of<'a, T: Clone + Send + Sync + 'static>(
@@ -70,14 +110,15 @@ pub(crate) struct XmlInput {
 
 pub(crate) fn xml_file_from_args(
     name: &str,
-    args: &ArgMatches,
+    cfg: &Config,
+    vars: &Vars,
 ) -> NetconfClientResult<Option<String>> {
-    match value_of_if_exists::<String>(name, args) {
+    match value_of_if_exists::<String>(name, &cfg.args) {
         Some(path) => {
             let content = std::fs::read_to_string(path).map_err(|err| {
                 NetconfClientError::new(format!("failed to read {name} '{path}': {err}"))
             })?;
-            Ok(Some(content))
+            Ok(Some(maybe_render(path, content, cfg.template, vars)?))
         }
         None => Ok(None),
     }
@@ -125,11 +166,35 @@ pub(crate) fn filter_from_args(cfg: &Config) -> NetconfClientResult<Option<Filte
     }
 }
 
-pub(crate) fn xml_inputs_from_args(name: &str, cfg: &Config) -> NetconfClientResult<Vec<XmlInput>> {
-    match value_of_if_exists::<String>(name, &cfg.args) {
-        Some(value) => read_xml_arg_inputs(name, value, cfg.stdin_xml.as_deref()),
-        None => Ok(Vec::new()),
+pub(crate) fn xml_inputs_from_args(
+    name: &str,
+    cfg: &Config,
+    vars: &Vars,
+) -> NetconfClientResult<Vec<XmlInput>> {
+    let mut files = match value_of_if_exists::<String>(name, &cfg.args) {
+        Some(value) => read_xml_arg_inputs(name, value, cfg.stdin_xml.as_deref())?,
+        None => Vec::new(),
+    };
+    if cfg.template {
+        for file in &mut files {
+            file.content = maybe_render(&file.name, file.content.clone(), true, vars)?;
+        }
     }
+    Ok(files)
+}
+
+fn maybe_render(
+    name: &str,
+    content: String,
+    template: bool,
+    vars: &Vars,
+) -> NetconfClientResult<String> {
+    if !template {
+        return Ok(content);
+    }
+    template::render(&content, vars).map_err(|err| {
+        NetconfClientError::new(format!("failed to render template '{name}': {err}"))
+    })
 }
 
 fn read_xml_arg_inputs(

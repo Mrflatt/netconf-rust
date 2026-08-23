@@ -1,5 +1,6 @@
 use crate::commands::builtin::{arg, value_of, xml_file_from_args};
 use crate::config::Config;
+use crate::inventory::Target;
 use clap::{Command, ValueHint};
 use log::error;
 use netconf_async::connection::Connection;
@@ -51,9 +52,9 @@ pub fn cli() -> Command {
         ])
 }
 
-pub async fn exec(cfg: &Config, conn: &mut Connection, host: &str) -> NetconfClientResult<()> {
-    let target = Datastore::from_str(value_of::<String>("target", &cfg.args))?;
-    let source = if let Some(xml) = xml_file_from_args("config", &cfg.args)? {
+pub async fn exec(cfg: &Config, conn: &mut Connection, target: &Target) -> NetconfClientResult<()> {
+    let datastore = Datastore::from_str(value_of::<String>("target", &cfg.args))?;
+    let source = if let Some(xml) = xml_file_from_args("config", cfg, &target.vars)? {
         CopySource::Config(xml)
     } else {
         CopySource::from(Datastore::from_str(value_of::<String>(
@@ -61,8 +62,8 @@ pub async fn exec(cfg: &Config, conn: &mut Connection, host: &str) -> NetconfCli
         ))?)
     };
 
-    match conn.copy_config(source, target).await {
-        Ok(resp) => cfg.output.emit(host, &resp),
+    match conn.copy_config(source, datastore).await {
+        Ok(resp) => cfg.output.emit(&target.address, &resp),
         Err(err) => {
             error!("Copy error: {}", err);
             Err(err)

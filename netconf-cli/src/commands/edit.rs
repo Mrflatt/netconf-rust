@@ -1,5 +1,6 @@
 use crate::commands::builtin::{arg, value_of, value_of_if_exists, xml_inputs_from_args};
 use crate::config::Config;
+use crate::inventory::Target;
 use clap::{Arg, ArgAction, Command, ValueHint, arg};
 use log::{debug, error, info, warn};
 use netconf_async::connection::Connection;
@@ -109,8 +110,8 @@ pub fn cli() -> Command {
         ])
 }
 
-pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
-    match run(cfg, conn).await {
+pub async fn exec(cfg: &Config, conn: &mut Connection, device: &Target) -> NetconfClientResult<()> {
+    match run(cfg, conn, device).await {
         Ok(()) => Ok(()),
         Err(err) => {
             error!("Edit error: {}", err);
@@ -119,7 +120,7 @@ pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()
     }
 }
 
-async fn run(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
+async fn run(cfg: &Config, conn: &mut Connection, device: &Target) -> NetconfClientResult<()> {
     let has_candidate = conn.has_capability(CANDIDATE_CAP);
     let has_writable_running = conn.has_capability(WRITABLE_RUNNING_CAP);
     let has_rollback = conn.has_capability(ROLLBACK_ON_ERROR_CAP);
@@ -137,7 +138,7 @@ async fn run(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
     let files = if url.is_some() {
         Vec::new()
     } else {
-        let files = xml_inputs_from_args("file", cfg)?;
+        let files = xml_inputs_from_args("file", cfg, &device.vars)?;
         if files.is_empty() {
             return Err(NetconfClientError::new(
                 "config file/directory or url required".to_string(),

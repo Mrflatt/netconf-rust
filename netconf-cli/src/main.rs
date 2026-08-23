@@ -7,7 +7,9 @@ use netconf_async::error::NetconfClientResult;
 mod cli;
 mod commands;
 mod config;
+mod inventory;
 mod output;
+mod template;
 mod update;
 
 fn quiet_libraries(builder: &mut Builder) {

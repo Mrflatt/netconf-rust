@@ -1,4 +1,5 @@
 use crate::commands::builtin::{value_of_if_exists, values_of};
+use crate::inventory::{self, Target};
 use crate::output::{Format, Output};
 use clap::ArgMatches;
 use dirs::home_dir;
@@ -25,21 +26,27 @@ pub struct Config {
     pub ssh_config: Option<SshConfig>,
     pub username: Option<String>,
     pub password: Option<String>,
-    pub addresses: Vec<String>,
+    pub targets: Vec<Target>,
     pub strict_host_key: Option<HostKeyCheck>,
     pub timeout: Option<Duration>,
     pub parallel: usize,
     pub stdin_xml: Option<String>,
     pub output: Output,
+    pub template: bool,
+    pub dry_run: Option<DryRun>,
 }
 
 impl CliConfig {
     pub fn new(args: ArgMatches) -> NetconfClientResult<Self> {
         let ssh_config = load_ssh_config();
-        let hosts = values_of::<String>("host", &args)
-            .iter()
-            .map(|h| h.to_string())
-            .collect();
+        let delimiter = value_of_if_exists::<u8>("delimiter", &args)
+            .copied()
+            .unwrap_or(b',');
+        let hosts = values_of::<String>("host", &args);
+        let targets = inventory::expand_hosts(
+            &hosts.iter().map(|h| h.as_str()).collect::<Vec<_>>(),
+            delimiter,
+        )?;
         let username = value_of_if_exists::<String>("username", &args).cloned();
         let password = value_of_if_exists::<String>("password", &args).cloned();
         let strict_host_key = value_of_if_exists::<String>("strict-host-key-checking", &args)
@@ -54,11 +61,16 @@ impl CliConfig {
             .cloned()
             .unwrap_or_default();
         let output_dir = value_of_if_exists::<String>("output-dir", &args).map(PathBuf::from);
+        let force_template = value_of_if_exists::<bool>("template", &args)
+            .copied()
+            .unwrap_or(false);
+        let template = force_template || targets.iter().any(|target| target.vars.is_some());
+        let dry_run = value_of_if_exists::<DryRun>("dry-run", &args).copied();
         Ok(Self {
             inner: Arc::new(Config {
                 username,
                 password,
-                addresses: hosts,
+                targets,
                 args,
                 ssh_config,
                 strict_host_key,
@@ -66,8 +78,23 @@ impl CliConfig {
                 parallel,
                 stdin_xml,
                 output: Output::new(format, output_dir),
+                template,
+                dry_run,
             }),
         })
+    }
+}
+
+/// Offline payload preview. `session` is reserved for a later hello-and-print mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DryRun {
+    Data,
+}
+
+pub fn parse_dry_run(value: &str) -> Result<DryRun, String> {
+    match value {
+        "data" => Ok(DryRun::Data),
+        other => Err(format!("unknown dry-run mode '{other}' (use data)")),
     }
 }
 

@@ -1,5 +1,5 @@
-use crate::commands::builtin::{builtin, builtin_exec};
-use crate::config::{CliConfig, Host};
+use crate::commands::builtin::{builtin, builtin_exec, dry_run_data};
+use crate::config::{CliConfig, DryRun, Host};
 use clap::{
     Arg, ArgAction, Command, arg, crate_authors, crate_description, crate_name, crate_version,
 };
@@ -15,17 +15,20 @@ use std::time::Instant;
 use tokio::task::JoinHandle;
 
 pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
-    let hosts = &cfg.inner.addresses;
+    if cfg.inner.dry_run == Some(DryRun::Data) {
+        return exec_dry_run(&cmd, &cfg);
+    }
+    let hosts = &cfg.inner.targets;
     let sem = Arc::new(tokio::sync::Semaphore::new(cfg.inner.parallel));
     let mut prepared = Vec::new();
-    for addr in hosts {
+    for target in hosts {
         let params = if let Some(ssh_config) = &cfg.inner.ssh_config {
-            ssh_config.query(addr)
+            ssh_config.query(&target.address)
         } else {
             HostParams::new(&DefaultAlgorithms::default())
         };
         let host = Host::new(
-            addr,
+            &target.address,
             &cfg.inner.username,
             &cfg.inner.password,
             params,
@@ -34,13 +37,13 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
         )?
         .strict_host_key(cfg.inner.strict_host_key);
         let ssh_config = host.ssh_transport_config()?;
-        prepared.push((host, ssh_config, addr.clone()));
+        prepared.push((host, ssh_config, target.clone()));
     }
     let mut pools = Vec::new();
     let mut targets = Vec::new();
-    for (host, ssh_config, addr) in prepared {
+    for (host, ssh_config, target) in prepared {
         let pool = shared_jump_pool(ssh_config.jumps(), &mut pools)?;
-        targets.push((host, ssh_config, addr, pool));
+        targets.push((host, ssh_config, target, pool));
     }
     for (jumps, pool) in &pools {
         let n = targets
@@ -59,7 +62,7 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
         }
     }
     let mut futures = FuturesUnordered::new();
-    for (host, ssh_config, addr, pool) in targets {
+    for (host, ssh_config, target, pool) in targets {
         let start_time = Instant::now();
         let cmd_clone = cmd.clone();
         let cfg_clone = cfg.clone();
@@ -86,7 +89,7 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
             );
 
             if let Some(result) =
-                builtin_exec(&cmd_clone, &mut connection, &cfg_clone.inner, &addr).await
+                builtin_exec(&cmd_clone, &mut connection, &cfg_clone.inner, &target).await
             {
                 result
             } else {
@@ -161,7 +164,7 @@ See '<cyan,bold>netconf help</> <cyan><<command>></>' for more information on a 
                 .global(true),
             arg!(-q --quiet "Disable logging completely")
                 .global(true),
-            global_opt("host", "NETCONF host (repeat or comma-separate for fan-out)")
+            global_opt("host", "NETCONF host (repeat, comma-separate, or @file.csv)")
                 .env("NETCONF_HOST")
                 .action(ArgAction::Append)
                 .value_delimiter(','),
@@ -191,6 +194,25 @@ See '<cyan,bold>netconf help</> <cyan><<command>></>' for more information on a 
                 .help("Write each host reply to DIR/{host}.{xml|json} instead of stdout")
                 .value_hint(clap::ValueHint::DirPath)
                 .global(true),
+            Arg::new("delimiter")
+                .long("delimiter")
+                .help("Delimiter for --host @file.csv")
+                .value_parser(crate::inventory::parse_delimiter)
+                .default_value(",")
+                .global(true),
+            Arg::new("template")
+                .long("template")
+                .help("Parse --file XML as a template even without inventory columns")
+                .action(ArgAction::SetTrue)
+                .global(true),
+            Arg::new("dry-run")
+                .long("dry-run")
+                .help("Print rendered XML without connecting (data)")
+                .value_parser(crate::config::parse_dry_run)
+                .num_args(0..=1)
+                .require_equals(true)
+                .default_missing_value("data")
+                .global(true),
             Arg::new("strict-host-key-checking")
                 .long("strict-host-key-checking")
                 .help("Host-key check: accept-new (default), yes, or no")
@@ -201,6 +223,13 @@ See '<cyan,bold>netconf help</> <cyan><<command>></>' for more information on a 
         ])
         .subcommands(builtin())
         .subcommand(crate::commands::update::cli())
+}
+
+fn exec_dry_run(cmd: &str, cfg: &CliConfig) -> NetconfClientResult<()> {
+    for target in &cfg.inner.targets {
+        dry_run_data(cmd, &cfg.inner, target)?;
+    }
+    Ok(())
 }
 
 fn global_opt(name: &'static str, help: &'static str) -> Arg {
@@ -301,6 +330,72 @@ fn format_and_output_dir_flags() {
         cfg.inner.output.dir_for_test().unwrap().as_os_str(),
         "/tmp/replies"
     );
+}
+
+#[test]
+fn host_file_and_dry_run_flags() {
+    use crate::config::{CliConfig, DryRun};
+    use crate::inventory::Vars;
+
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("hosts.csv");
+    std::fs::write(&csv, "ip,role\n192.0.2.10,edge\n192.0.2.10,core\n").unwrap();
+    let at = format!("@{}", csv.display());
+
+    let mut matches = cli()
+        .try_get_matches_from([
+            "netconf",
+            "--host",
+            "r1.example",
+            "--host",
+            &at,
+            "--dry-run",
+            "edit",
+            "--file",
+            "<config/>",
+        ])
+        .unwrap();
+    let (_, args) = matches.remove_subcommand().unwrap();
+    let cfg = CliConfig::new(args).unwrap();
+    assert_eq!(cfg.inner.dry_run, Some(DryRun::Data));
+    assert!(cfg.inner.template);
+    assert_eq!(cfg.inner.targets.len(), 2);
+    assert_eq!(cfg.inner.targets[0].address, "r1.example");
+    assert_eq!(cfg.inner.targets[0].vars, Vars::None);
+    assert_eq!(cfg.inner.targets[1].address, "192.0.2.10");
+    assert!(matches!(cfg.inner.targets[1].vars, Vars::List(_)));
+}
+
+#[tokio::test]
+async fn dry_run_data_writes_rendered_xml() {
+    use crate::config::CliConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("hosts.csv");
+    std::fs::write(&csv, "ip,portId\n192.0.2.10,1/1/1\n").unwrap();
+    let xml = dir.path().join("edit.xml");
+    std::fs::write(&xml, "<port-id>{{ .portId }}</port-id>\n").unwrap();
+    let out = dir.path().join("out");
+    let at = format!("@{}", csv.display());
+
+    let mut matches = cli()
+        .try_get_matches_from([
+            "netconf",
+            "--host",
+            &at,
+            "--dry-run",
+            "--output-dir",
+            out.to_str().unwrap(),
+            "edit",
+            "--file",
+            xml.to_str().unwrap(),
+        ])
+        .unwrap();
+    let (cmd, args) = matches.remove_subcommand().unwrap();
+    let cfg = CliConfig::new(args).unwrap();
+    exec(cmd, cfg).await.unwrap();
+    let body = std::fs::read_to_string(out.join("192.0.2.10.xml")).unwrap();
+    assert_eq!(body, "<port-id>1/1/1</port-id>\n");
 }
 
 #[test]
