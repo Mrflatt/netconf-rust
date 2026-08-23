@@ -1,7 +1,6 @@
 use crate::commands::builtin::{arg, filter_from_args, value_of, value_of_if_exists};
 use crate::config::Config;
 use clap::{Command, ValueHint};
-use log::error;
 use netconf_async::connection::Connection;
 use netconf_async::error::NetconfClientResult;
 use netconf_async::message::{Datastore, WithDefaultsValue};
@@ -56,11 +55,6 @@ pub async fn exec(cfg: &Config, conn: &mut Connection, host: &str) -> NetconfCli
         .map(|value| WithDefaultsValue::from_str(value).unwrap());
     let source = Datastore::from_str(source)?;
     let filter = filter_from_args(cfg)?;
-    match conn.get_config(source, filter, with_defaults).await {
-        Ok(resp) => cfg.output.emit(host, &resp),
-        Err(err) => {
-            error!("Get error: {}", err);
-            Err(err)
-        }
-    }
+    let resp = conn.get_config(source, filter, with_defaults).await?;
+    cfg.output.emit(host, &resp)
 }

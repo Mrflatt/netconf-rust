@@ -219,10 +219,11 @@ A header with `ip` or `host` turns extra columns into template variables. The sa
 
 | Flag | Effect |
 |---|---|
-| _(none)_ | info on stderr, library quiet |
-| `-v` | debug, library quiet (no russh / ssh2_config) |
-| `-vv` | debug + connection + russh / ssh2_config |
-| `-vvv` | debug including RPC frames |
+| _(none)_ | info + warn (library included); russh / ssh2_config off |
+| `-v` | debug (steps, session, jumps); russh / ssh2_config off |
+| `-vv` | trace (wire XML); russh / ssh2_config off |
+| `-vvv` | trace + russh / ssh2_config debug |
+| `-vvvv` | trace + russh / ssh2_config trace |
 | `-q` | no logs |
 
 ## Development

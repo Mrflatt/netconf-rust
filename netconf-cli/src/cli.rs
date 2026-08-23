@@ -6,6 +6,7 @@ use clap::{
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use log::{debug, error, info};
+use netconf_async::NETCONF_BASE_11_CAP;
 use netconf_async::connection::Connection;
 use netconf_async::error::{NetconfClientError, NetconfClientResult};
 use netconf_async::transport::ssh::{JumpPool, SshJump, SshTransport};
@@ -14,9 +15,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
 
-pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
+pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<bool> {
     if cfg.inner.dry_run == Some(DryRun::Data) {
-        return exec_dry_run(&cmd, &cfg);
+        exec_dry_run(&cmd, &cfg)?;
+        return Ok(true);
     }
     let hosts = &cfg.inner.targets;
     let sem = Arc::new(tokio::sync::Semaphore::new(cfg.inner.parallel));
@@ -64,67 +66,72 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
     let mut futures = FuturesUnordered::new();
     for (host, ssh_config, target, pool) in targets {
         let start_time = Instant::now();
-        let cmd_clone = cmd.clone();
-        let cfg_clone = cfg.clone();
+        let cmd = cmd.clone();
+        let cfg = cfg.clone();
         let sem = sem.clone();
-        let handle: JoinHandle<NetconfClientResult<()>> = tokio::spawn(async move {
-            let _permit = sem.acquire_owned().await.map_err(|err| {
-                NetconfClientError::new(format!("failed to acquire host slot: {err}"))
-            })?;
-            let ssh_transport = match pool {
-                Some(pool) => pool.connect_device(ssh_config).await?,
-                None => SshTransport::connect(ssh_config).await?,
-            };
-            let mut connection = Connection::new(ssh_transport).await?;
-            if let Some(timeout) = cfg_clone.inner.timeout {
-                connection.set_timeout(Some(timeout));
+        let address = host.address.clone();
+        let handle: JoinHandle<(String, NetconfClientResult<()>)> = tokio::spawn(async move {
+            let result = async {
+                let _permit = sem.acquire_owned().await.map_err(|err| {
+                    NetconfClientError::new(format!("failed to acquire host slot: {err}"))
+                })?;
+                let ssh_transport = match pool {
+                    Some(pool) => pool.connect_device(ssh_config).await?,
+                    None => SshTransport::connect(ssh_config).await?,
+                };
+                let mut connection = Connection::new(ssh_transport).await?;
+                if let Some(timeout) = cfg.inner.timeout {
+                    connection.set_timeout(Some(timeout));
+                }
+                info!(target: &host.address, "Connected to host");
+                debug!(
+                    target: &host.address,
+                    "started NETCONF session with session-id: {}, framing {}",
+                    connection
+                        .session_id()
+                        .map_or_else(|| "unknown".to_string(), |id| id.to_string()),
+                    if connection.has_capability(NETCONF_BASE_11_CAP) {
+                        "1.1"
+                    } else {
+                        "1.0"
+                    }
+                );
+
+                let op = match builtin_exec(&cmd, &mut connection, &cfg.inner, &target).await {
+                    Some(result) => result,
+                    None => Err(NetconfClientError::new("Unknown command")),
+                };
+                if op.is_ok() {
+                    info!(
+                        target: &host.address,
+                        "Operation took: {:.3}s",
+                        start_time.elapsed().as_secs_f32()
+                    );
+                }
+                let close = connection.close_session().await.map(|_| ());
+                op.and(close)
             }
-            info!(target: &host.address, "Connected to host");
-            debug!(
-                target: &host.address,
-                "Started Netconf session with session-id: {}",
-                connection
-                    .session_id()
-                    .map_or_else(|| "unknown".to_string(), |id| id.to_string())
-            );
-
-            if let Some(result) =
-                builtin_exec(&cmd_clone, &mut connection, &cfg_clone.inner, &target).await
-            {
-                result
-            } else {
-                Err(NetconfClientError::new("Unknown command"))
-            }?;
-
-            info!(target: &host.address, "Operation took: {:.3}s", start_time.elapsed().as_secs_f32());
-            connection.close_session().await?;
-            Ok(())
+            .await;
+            (address, result)
         });
         futures.push(handle);
     }
 
-    let mut first_err = None;
+    let mut failed = false;
     while let Some(handle) = futures.next().await {
         match handle {
-            Ok(Ok(())) => debug!("Task completed successfully"),
-            Ok(Err(err)) => {
-                error!("Task failed with error: {}", err);
-                if first_err.is_none() {
-                    first_err = Some(err);
-                }
+            Ok((_, Ok(()))) => {}
+            Ok((address, Err(err))) => {
+                report_host_error(&address, &err);
+                failed = true;
             }
             Err(err) => {
-                error!("Task failed: {}", err);
-                if first_err.is_none() {
-                    first_err = Some(NetconfClientError::new(format!("Task failed: {err}")));
-                }
+                error!("Task failed: {err}");
+                failed = true;
             }
         }
     }
-    match first_err {
-        Some(err) => Err(err),
-        None => Ok(()),
-    }
+    Ok(!failed)
 }
 
 pub fn cli() -> Command {
@@ -160,7 +167,7 @@ pub fn cli() -> Command {
 See '<cyan,bold>netconf help</> <cyan><<command>></>' for more information on a specific command.\n",
         ))
         .args([
-            arg!(-v --verbose ... "Use verbose output (-vv to log all rpc responses, -vvv to print also rpc requests)")
+            arg!(-v --verbose ... "Use verbose output (-v debug, -vv wire/trace, -vvv russh debug, -vvvv russh trace)")
                 .global(true),
             arg!(-q --quiet "Disable logging completely")
                 .global(true),
@@ -223,6 +230,24 @@ See '<cyan,bold>netconf help</> <cyan><<command>></>' for more information on a 
         ])
         .subcommands(builtin())
         .subcommand(crate::commands::update::cli())
+}
+
+fn report_host_error(address: &str, err: &NetconfClientError) {
+    match err {
+        NetconfClientError::Netconf { operation, reply } => {
+            error!(target: address, "{} failed", capitalize_ascii(operation));
+            eprintln!("{reply}");
+        }
+        _ => error!(target: address, "{err}"),
+    }
+}
+
+fn capitalize_ascii(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 fn exec_dry_run(cmd: &str, cfg: &CliConfig) -> NetconfClientResult<()> {

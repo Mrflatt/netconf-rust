@@ -3,7 +3,7 @@ use crate::inventory::{self, Target};
 use crate::output::{Format, Output};
 use clap::ArgMatches;
 use dirs::home_dir;
-use log::{debug, error, warn};
+use log::{debug, error, trace, warn};
 use netconf_async::error::{NetconfClientError, NetconfClientResult};
 use netconf_async::transport::ssh::{
     HostKeyPolicy, SshAuth, SshConfig as TransportSshConfig, SshJump, SshSessionOpts,
@@ -151,12 +151,12 @@ fn capture_stdin_xml(args: &ArgMatches) -> NetconfClientResult<Option<String>> {
 }
 
 fn read_ssh_config(path: &Path) -> Option<SshConfig> {
-    debug!("Trying to parse ssh configuration '{}'", path.display());
+    trace!("trying to parse ssh configuration '{}'", path.display());
 
     let mut reader = match File::open(path) {
         Ok(f) => BufReader::new(f),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            debug!("No ssh config at '{}'", path.display());
+            trace!("no ssh config at '{}'", path.display());
             return None;
         }
         Err(err) => {
@@ -173,7 +173,7 @@ fn read_ssh_config(path: &Path) -> Option<SshConfig> {
         ParseRule::ALLOW_UNKNOWN_FIELDS | ParseRule::ALLOW_UNSUPPORTED_FIELDS,
     ) {
         Ok(config) => {
-            debug!("Successfully parsed configuration {}", path.display());
+            trace!("successfully parsed configuration {}", path.display());
             Some(config)
         }
         Err(err) => {
@@ -325,7 +325,7 @@ impl Host {
                 let jump = self.resolve_jump(spec)?;
                 debug!(
                     target: &self.address,
-                    "Connecting via ProxyJump {spec} ({}:{})",
+                    "connecting via ProxyJump {spec} ({}:{})",
                     jump.address, jump.port
                 );
                 config = config.jump(
@@ -443,10 +443,11 @@ fn session_opts(params: &HostParams) -> SshSessionOpts {
     if let Some(compress) = params.compression {
         opts = opts.compression(compress);
     }
-    if params.tcp_keep_alive.unwrap_or(false)
-        && let Some(interval) = params.server_alive_interval
-    {
+    // OpenSSH ServerAliveInterval is independent of TCPKeepAlive.
+    if let Some(interval) = params.server_alive_interval {
         opts = opts.keepalive(interval);
+    } else {
+        opts = opts.keepalive(std::time::Duration::from_secs(15));
     }
     if !params.kex_algorithms.is_default() {
         opts = opts.kex_algorithms(params.kex_algorithms.algorithms().join(","));

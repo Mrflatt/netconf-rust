@@ -2,7 +2,7 @@ use crate::commands::builtin::{arg, value_of, value_of_if_exists, xml_inputs_fro
 use crate::config::Config;
 use crate::inventory::Target;
 use clap::{Arg, ArgAction, Command, ValueHint, arg};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use netconf_async::connection::Connection;
 use netconf_async::error::{NetconfClientError, NetconfClientResult};
 use netconf_async::message::{
@@ -111,16 +111,6 @@ pub fn cli() -> Command {
 }
 
 pub async fn exec(cfg: &Config, conn: &mut Connection, device: &Target) -> NetconfClientResult<()> {
-    match run(cfg, conn, device).await {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            error!("Edit error: {}", err);
-            Err(err)
-        }
-    }
-}
-
-async fn run(cfg: &Config, conn: &mut Connection, device: &Target) -> NetconfClientResult<()> {
     let has_candidate = conn.has_capability(CANDIDATE_CAP);
     let has_writable_running = conn.has_capability(WRITABLE_RUNNING_CAP);
     let has_rollback = conn.has_capability(ROLLBACK_ON_ERROR_CAP);
@@ -180,7 +170,7 @@ async fn run(cfg: &Config, conn: &mut Connection, device: &Target) -> NetconfCli
         ));
     }
     if !skip_lock {
-        debug!("Locking {target:?} datastore");
+        debug!("locking {target:?} datastore");
         conn.lock(target.clone()).await?;
     }
 
@@ -196,7 +186,7 @@ async fn run(cfg: &Config, conn: &mut Connection, device: &Target) -> NetconfCli
             .await?;
         } else {
             for file in &files {
-                debug!("Applying {}", file.name);
+                debug!("applying {}", file.name);
                 conn.edit_config(
                     target.clone(),
                     EditContent::Config(file.content.clone()),
@@ -209,12 +199,12 @@ async fn run(cfg: &Config, conn: &mut Connection, device: &Target) -> NetconfCli
         }
 
         if has_validate && is_candidate && test_option.is_none() {
-            debug!("Validating candidate datastore");
+            debug!("validating candidate datastore");
             conn.validate(target.clone()).await?;
         }
 
         if is_candidate {
-            debug!("Committing candidate");
+            debug!("committing candidate");
             if confirmed {
                 conn.confirmed_commit(Some(commit_timeout), Some(persist_id.clone()), None)
                     .await?;
@@ -227,7 +217,7 @@ async fn run(cfg: &Config, conn: &mut Connection, device: &Target) -> NetconfCli
     .await;
 
     if result.is_err() && is_candidate {
-        debug!("Discarding candidate changes after error");
+        debug!("discarding candidate changes after error");
         if let Err(discard_err) = conn.discard_changes().await {
             warn!("Discard-changes failed: {discard_err}");
         }
@@ -246,7 +236,7 @@ async fn run(cfg: &Config, conn: &mut Connection, device: &Target) -> NetconfCli
 
     let test_only = matches!(test_option, Some(TestOption::TestOnly));
     if !no_copy && has_startup && !test_only && !confirmed {
-        debug!("Copying running to startup");
+        debug!("copying running to startup");
         conn.copy_config(CopySource::Running, Datastore::Startup)
             .await?;
     }

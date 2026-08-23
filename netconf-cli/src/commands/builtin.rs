@@ -56,12 +56,12 @@ pub fn dry_run_data(cmd: &str, cfg: &Config, target: &Target) -> NetconfClientRe
         "copy" => match xml_file_from_args("config", cfg, &target.vars)? {
             Some(xml) => cfg.output.emit(&target.address, &xml),
             None => {
-                info!("dry-run data: copy has no --config payload");
+                info!("Dry-run data: copy has no --config payload");
                 Ok(())
             }
         },
         other => {
-            info!("dry-run data: no file payload for {other}");
+            info!("Dry-run data: no file payload for {other}");
             Ok(())
         }
     }

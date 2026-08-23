@@ -81,13 +81,8 @@ pub async fn exec(cfg: &Config, conn: &mut Connection, host: &str) -> NetconfCli
         let filter = Filter::subtree(
             r#"<netconf xmlns="urn:ietf:params:xml:ns:netmod:notification"><streams/></netconf>"#,
         );
-        match conn.get(Some(filter), None).await {
-            Ok(resp) => cfg.output.emit(host, &resp),
-            Err(err) => {
-                error!("Get error: {}", err);
-                Err(err)
-            }
-        }
+        let resp = conn.get(Some(filter), None).await?;
+        cfg.output.emit(host, &resp)
     } else {
         let stream = value_of::<String>("stream", args);
         let filter = filter_from_args(cfg)?;
@@ -109,7 +104,7 @@ pub async fn exec(cfg: &Config, conn: &mut Connection, host: &str) -> NetconfCli
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 if let Err(err) = output.emit(&host, &msg) {
-                    error!("failed to write notification: {err}");
+                    error!("Failed to write notification: {err}");
                 }
             }
         });

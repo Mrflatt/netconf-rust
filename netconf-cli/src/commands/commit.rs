@@ -1,7 +1,7 @@
 use crate::commands::builtin::{arg, value_of, value_of_if_exists};
 use crate::config::Config;
 use clap::{Arg, ArgAction, Command};
-use log::{debug, error, info};
+use log::{debug, info};
 use netconf_async::STARTUP_CAP;
 use netconf_async::connection::Connection;
 use netconf_async::error::{NetconfClientError, NetconfClientResult};
@@ -42,16 +42,6 @@ pub fn cli() -> Command {
 }
 
 pub async fn exec(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
-    match run(cfg, conn).await {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            error!("Commit error: {}", err);
-            Err(err)
-        }
-    }
-}
-
-async fn run(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
     let persist_id = value_of_if_exists::<String>("id", &cfg.args);
     let cancel = *value_of::<bool>("cancel", &cfg.args);
     let no_copy = *value_of::<bool>("no-copy", &cfg.args);
@@ -61,7 +51,7 @@ async fn run(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
             .ok_or_else(|| NetconfClientError::new("--id is required with --cancel".to_string()))?;
         info!("Cancelling confirmed commit persist-id: {persist_id}");
         conn.cancel_commit(Some(persist_id.clone())).await?;
-        debug!("Discarding candidate changes");
+        debug!("discarding candidate changes");
         conn.discard_changes().await?;
         return Ok(());
     }
@@ -72,13 +62,13 @@ async fn run(cfg: &Config, conn: &mut Connection) -> NetconfClientResult<()> {
             conn.confirm_commit(id.clone()).await?;
         }
         None => {
-            debug!("Committing candidate");
+            debug!("committing candidate");
             conn.commit().await?;
         }
     }
 
     if !no_copy && conn.has_capability(STARTUP_CAP) {
-        debug!("Copying running to startup");
+        debug!("copying running to startup");
         conn.copy_config(CopySource::Running, Datastore::Startup)
             .await?;
     }

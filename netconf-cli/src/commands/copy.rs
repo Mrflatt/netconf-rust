@@ -2,7 +2,6 @@ use crate::commands::builtin::{arg, value_of, xml_file_from_args};
 use crate::config::Config;
 use crate::inventory::Target;
 use clap::{Command, ValueHint};
-use log::error;
 use netconf_async::connection::Connection;
 use netconf_async::error::NetconfClientResult;
 use netconf_async::message::{CopySource, Datastore};
@@ -62,11 +61,6 @@ pub async fn exec(cfg: &Config, conn: &mut Connection, target: &Target) -> Netco
         ))?)
     };
 
-    match conn.copy_config(source, datastore).await {
-        Ok(resp) => cfg.output.emit(&target.address, &resp),
-        Err(err) => {
-            error!("Copy error: {}", err);
-            Err(err)
-        }
-    }
+    let resp = conn.copy_config(source, datastore).await?;
+    cfg.output.emit(&target.address, &resp)
 }
