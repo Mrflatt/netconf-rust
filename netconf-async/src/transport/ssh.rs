@@ -7,14 +7,14 @@ use crate::transport::Transport;
 use async_trait::async_trait;
 use core::fmt;
 use core::time::Duration;
-use log::{debug, warn};
+use log::{debug, trace, warn};
 use russh::client::{self, Handle};
 use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::AgentClient;
 use russh::keys::{
     self, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, known_hosts,
 };
-use russh::{ChannelStream, Disconnect, Preferred};
+use russh::{Channel, ChannelMsg, ChannelStream, Disconnect, Preferred};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -381,7 +381,7 @@ impl JumpSession {
         let first = hops.next().ok_or_else(|| {
             NetconfClientError::new("JumpSession::connect requires at least one hop")
         })?;
-        debug!("Connecting via ProxyJump {}:{}", first.host, first.port);
+        debug!("connecting via ProxyJump {}:{}", first.host, first.port);
         let mut last = handshake_and_auth(
             connect_tcp(&first.host, first.port).await?,
             target_from_jump(first),
@@ -389,7 +389,7 @@ impl JumpSession {
         .await?;
         let mut upstream = Vec::new();
         for next in hops {
-            debug!("ProxyJump next hop {}:{}", next.host, next.port);
+            debug!("proxyjump next hop {}:{}", next.host, next.port);
             let stream = open_jump(&last, &next.host, next.port).await?;
             upstream.push(Arc::new(tokio::sync::Mutex::new(last)));
             last = handshake_and_auth(stream, target_from_jump(next)).await?;
@@ -541,7 +541,7 @@ impl Transport for SshTransport {
 
     async fn close(&mut self) -> NetconfClientResult<()> {
         if let Err(err) = self.framer.channel_mut().shutdown().await {
-            debug!("SSH channel shutdown: {err}");
+            debug!("ssh channel shutdown: {err}");
         }
         self.session
             .disconnect(Disconnect::ByApplication, "Shutdown", "")
@@ -675,16 +675,54 @@ where
 }
 
 async fn open_netconf(session: Handle<ClientHandler>) -> NetconfClientResult<SshTransport> {
-    let channel = session.channel_open_session().await.map_err(map_russh)?;
+    let mut channel = session.channel_open_session().await.map_err(map_russh)?;
     channel
         .request_subsystem(true, "netconf")
         .await
         .map_err(map_russh)?;
+    // russh `want_reply` only sets the SSH flag; it does not wait. CHANNEL_DATA
+    // sent before CHANNEL_SUCCESS is dropped by some devices (Huawei).
+    let prefix = wait_netconf_subsystem(&mut channel).await?;
+    let mut framer = AsyncFramer::new(channel.into_stream());
+    if !prefix.is_empty() {
+        debug!(
+            "netconf subsystem sent {} bytes before Success",
+            prefix.len()
+        );
+        framer.push_incoming(&prefix);
+    }
     Ok(SshTransport {
         session,
-        framer: AsyncFramer::new(channel.into_stream()),
+        framer,
         _jumps: None,
     })
+}
+
+async fn wait_netconf_subsystem(
+    channel: &mut Channel<client::Msg>,
+) -> NetconfClientResult<Vec<u8>> {
+    let mut prefix = Vec::new();
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::Success) => {
+                debug!("netconf subsystem confirmed");
+                return Ok(prefix);
+            }
+            Some(ChannelMsg::Failure) => {
+                return Err(NetconfClientError::new(
+                    "server refused the netconf subsystem",
+                ));
+            }
+            Some(ChannelMsg::Data { data }) => prefix.extend_from_slice(&data),
+            Some(ChannelMsg::ExtendedData { data, .. }) => prefix.extend_from_slice(&data),
+            Some(_) => {}
+            None => {
+                return Err(NetconfClientError::new(
+                    "connection closed while requesting the netconf subsystem",
+                ));
+            }
+        }
+    }
 }
 
 fn build_client_config(opts: &SshSessionOpts) -> NetconfClientResult<client::Config> {
@@ -737,7 +775,7 @@ fn parse_kex(prefs: &str) -> NetconfClientResult<Vec<russh::kex::Name>> {
                     out.push(alg);
                 }
             }
-            Err(()) => warn!("ignoring unknown SSH kex algorithm {name}"),
+            Err(()) => warn!("Ignoring unknown SSH kex algorithm {name}"),
         }
     }
     if out.is_empty() {
@@ -765,7 +803,7 @@ fn parse_host_keys(prefs: &str) -> NetconfClientResult<Vec<keys::Algorithm>> {
                     out.push(alg);
                 }
             }
-            Err(err) => warn!("ignoring unknown SSH host-key algorithm {name}: {err}"),
+            Err(err) => warn!("Ignoring unknown SSH host-key algorithm {name}: {err}"),
         }
     }
     if out.is_empty() {
@@ -785,7 +823,7 @@ fn parse_ciphers(prefs: &str) -> NetconfClientResult<Vec<russh::cipher::Name>> {
                     out.push(alg);
                 }
             }
-            Err(()) => warn!("ignoring unknown SSH cipher {name}"),
+            Err(()) => warn!("Ignoring unknown SSH cipher {name}"),
         }
     }
     if out.is_empty() {
@@ -805,7 +843,7 @@ fn parse_macs(prefs: &str) -> NetconfClientResult<Vec<russh::mac::Name>> {
                     out.push(alg);
                 }
             }
-            Err(()) => warn!("ignoring unknown SSH MAC algorithm {name}"),
+            Err(()) => warn!("Ignoring unknown SSH MAC algorithm {name}"),
         }
     }
     if out.is_empty() {
@@ -835,7 +873,7 @@ fn verify_host_key(
     if evaluate_host_key_policy(policy, &fingerprint) {
         if matches!(policy, HostKeyPolicy::AcceptAll) {
             warn!(
-                "accepting SSH host key for {host} without verification ({fingerprint}) — \
+                "Accepting SSH host key for {host} without verification ({fingerprint}) — \
                  set HostKeyPolicy::Fingerprint or HostKeyPolicy::KnownHosts for production use"
             );
         }
@@ -934,7 +972,7 @@ fn pin_new_host(
         ))
     })?;
     warn!(
-        "accepted new SSH host key for {host} ({fingerprint}); stored in {}",
+        "Accepted new SSH host key for {host} ({fingerprint}); stored in {}",
         path.display()
     );
     Ok(())
@@ -1058,7 +1096,7 @@ async fn authenticate_agent(
     for identity in identities {
         let result = match identity {
             AgentIdentity::PublicKey { key, comment } => {
-                debug!("trying ssh-agent identity {comment}");
+                trace!("trying ssh-agent identity {comment}");
                 session
                     .authenticate_publickey_with(username, key, hash, &mut agent)
                     .await
@@ -1067,7 +1105,7 @@ async fn authenticate_agent(
                 certificate,
                 comment,
             } => {
-                debug!("trying ssh-agent certificate {comment}");
+                trace!("trying ssh-agent certificate {comment}");
                 session
                     .authenticate_certificate_with(username, certificate, hash, &mut agent)
                     .await
@@ -1077,7 +1115,7 @@ async fn authenticate_agent(
             Ok(auth) if auth.success() => return Ok(true),
             Ok(_) => continue,
             Err(err) => {
-                debug!("ssh-agent identity rejected: {err}");
+                trace!("ssh-agent identity rejected: {err}");
             }
         }
     }

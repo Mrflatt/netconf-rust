@@ -163,9 +163,11 @@ impl Hello {
 
 impl Display for Hello {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut buffer = String::with_capacity(206);
+        let mut buffer = String::with_capacity(256);
+        buffer.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         self.serialize(Serializer::new(&mut buffer))
             .map_err(|_| fmt::Error)?;
+        buffer.push('\n');
         f.write_str(&buffer)
     }
 }
@@ -220,6 +222,11 @@ impl Rpc {
     /// True when this is a `<commit>` (including confirmed / persist confirm).
     pub(crate) fn is_commit(&self) -> bool {
         matches!(self.operation, RpcOperation::Commit(_))
+    }
+
+    /// RFC local-name of the wrapped operation (`get-config`, `lock`, …).
+    pub(crate) fn operation_name(&self) -> &'static str {
+        self.operation.name()
     }
 }
 
@@ -288,6 +295,26 @@ pub enum RpcOperation {
 }
 
 impl RpcOperation {
+    /// RFC local-name (`get-config`, `close-session`, …).
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::CloseSession => "close-session",
+            Self::KillSession { .. } => "kill-session",
+            Self::Validate { .. } => "validate",
+            Self::GetConfig(_) => "get-config",
+            Self::Get(_) => "get",
+            Self::EditConfig(_) => "edit-config",
+            Self::CopyConfig(_) => "copy-config",
+            Self::DeleteConfig { .. } => "delete-config",
+            Self::Lock { .. } => "lock",
+            Self::Unlock { .. } => "unlock",
+            Self::DiscardChanges => "discard-changes",
+            Self::CancelCommit(_) => "cancel-commit",
+            Self::Commit(_) => "commit",
+            Self::CreateSubscription(_) => "create-subscription",
+        }
+    }
+
     /// `<get-config>` ([RFC6241 7.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-7.1)).
     pub fn new_get_config(
         datastore: Datastore,
@@ -1195,6 +1222,20 @@ mod tests {
     }
 
     #[test]
+    fn operation_name_is_the_rfc_local_name() {
+        assert_eq!(RpcOperation::CloseSession.name(), "close-session");
+        assert_eq!(RpcOperation::new_get(None, None).name(), "get");
+        assert_eq!(
+            RpcOperation::new_get_config(Datastore::Running, None, None).name(),
+            "get-config"
+        );
+        assert_eq!(
+            rpc(RpcOperation::new_discard_changes()).operation_name(),
+            "discard-changes"
+        );
+    }
+
+    #[test]
     fn test_deserialize_rpc_reply() {
         let reply = r#"
 <rpc-reply message-id="67d83d6b-1f0b-47fb-8fdf-2cfc3fb2a371" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -1463,7 +1504,14 @@ mod tests {
 
     #[test]
     fn test_serialize_hello() {
-        let expected = r#"<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"><capabilities><capability>urn:ietf:params:netconf:base:1.0</capability><capability>urn:ietf:params:netconf:base:1.1</capability></capabilities></hello>"#;
+        let expected = concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+            "<hello xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\">",
+            "<capabilities>",
+            "<capability>urn:ietf:params:netconf:base:1.0</capability>",
+            "<capability>urn:ietf:params:netconf:base:1.1</capability>",
+            "</capabilities></hello>\n",
+        );
         assert_eq!(Hello::new().to_string(), expected);
     }
 

@@ -6,11 +6,11 @@ use crate::message::{
     RpcOperation, RpcReply, Source, TestOption, WithDefaultsValue, capability_id, from_xml,
 };
 use crate::transport::Transport;
-use crate::{INTERLEAVE_CAP, NETCONF_BASE_11_CAP, NOTIFICATION_CAP};
+use crate::{INTERLEAVE_CAP, NETCONF_BASE_11_CAP, NETCONF_URN, NOTIFICATION_CAP};
 use core::fmt;
 #[cfg(feature = "tokio")]
 use core::time::Duration;
-use log::{debug, warn};
+use log::{debug, trace, warn};
 use std::collections::VecDeque;
 #[cfg(feature = "tokio")]
 use tokio::sync::mpsc::Sender;
@@ -140,12 +140,15 @@ impl Connection {
     async fn hello(&mut self) -> NetconfClientResult<Option<u64>> {
         let hello = Hello::new();
         let response = self.write_and_receive(&hello.to_string(), false).await?;
-        debug!("Hello:\n{}", response);
+        trace!("hello:\n{}", response);
 
         let hello: Hello = from_xml(&response)?;
         self.capabilities = hello.capabilities();
         if hello.has_capability(NETCONF_BASE_11_CAP) {
+            debug!("server advertised :base:1.1; switching to chunked framing");
             self.transport.upgrade().await;
+        } else {
+            debug!("server did not advertise :base:1.1; staying on 1.0 framing");
         }
         Ok(hello.session_id())
     }
@@ -299,7 +302,7 @@ impl Connection {
         self.is_closed = true;
         let reply = self.run_rpc(close_session).await;
         if let Err(err) = self.transport.close().await {
-            debug!("Transport close after <close-session> failed: {}", err);
+            debug!("transport close after <close-session> failed: {}", err);
         }
         reply
     }
@@ -314,12 +317,18 @@ impl Connection {
     }
 
     /// Sends a raw XML RPC document and returns the reply.
+    ///
+    /// A document whose root is not `<rpc>` is wrapped in
+    /// `<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="N">`.
+    /// An existing `<rpc>` (any prefix) is sent as-is.
     pub async fn raw_rpc(&mut self, xml: &str) -> NetconfClientResult<String> {
+        let xml = self.ensure_rpc_envelope(xml);
         self.exchange(
-            xml,
-            request_message_id(xml).as_deref(),
-            request_is_commit(xml),
+            &xml,
+            request_message_id(&xml).as_deref(),
+            request_is_commit(&xml),
             self.warnings_as_errors,
+            &request_operation(&xml),
         )
         .await
     }
@@ -335,12 +344,14 @@ impl Connection {
         &mut self,
         xml: &str,
     ) -> NetconfClientResult<(String, Vec<crate::message::Error>)> {
+        let xml = self.ensure_rpc_envelope(xml);
         let response = self
             .exchange(
-                xml,
-                request_message_id(xml).as_deref(),
-                request_is_commit(xml),
+                &xml,
+                request_message_id(&xml).as_deref(),
+                request_is_commit(&xml),
                 false,
+                &request_operation(&xml),
             )
             .await?;
         let warnings = match from_xml::<RpcReply>(&response) {
@@ -406,7 +417,7 @@ impl Connection {
             if classify_incoming(&message) == Incoming::Notification {
                 return Ok(message);
             }
-            warn!("discarding unexpected message while waiting for notification");
+            warn!("Discarding unexpected message while waiting for notification");
         }
     }
 
@@ -447,7 +458,7 @@ impl Connection {
 
     fn buffer_notification(&mut self, notification: String) {
         if self.notification_buffer.len() >= MAX_NOTIFICATION_BUFFER {
-            warn!("notification buffer full ({MAX_NOTIFICATION_BUFFER}); dropping oldest");
+            warn!("Notification buffer full ({MAX_NOTIFICATION_BUFFER}); dropping oldest");
             self.notification_buffer.pop_front();
         }
         self.notification_buffer.push_back(notification);
@@ -462,6 +473,7 @@ impl Connection {
             Some(&message_id),
             is_commit,
             self.warnings_as_errors,
+            rpc.operation_name(),
         )
         .await
     }
@@ -472,18 +484,27 @@ impl Connection {
         id.to_string()
     }
 
+    fn ensure_rpc_envelope(&mut self, xml: &str) -> String {
+        if root_is_rpc(xml) {
+            xml.to_string()
+        } else {
+            wrap_in_rpc(xml, &self.allocate_message_id())
+        }
+    }
+
     async fn exchange(
         &mut self,
         request: &str,
         expected_message_id: Option<&str>,
         is_commit: bool,
         warnings_as_errors: bool,
+        operation: &str,
     ) -> NetconfClientResult<String> {
         if self.desynchronized {
             return Err(NetconfClientError::SessionDesynchronized);
         }
         let response = self.write_and_receive(request, is_commit).await?;
-        debug!("RPC:\n{}", response);
+        trace!("rpc:\n{response}");
 
         let reply = match from_xml::<RpcReply>(&response) {
             Ok(reply) => reply,
@@ -492,19 +513,23 @@ impl Connection {
         };
 
         if let Some(expected) = expected_message_id
-            && reply.message_id() != Some(expected)
+            && let Some(actual) = reply.message_id()
+            && actual != expected
         {
             // The mismatched message is already consumed; the real reply may
             // still arrive and would be read as the next answer.
             self.desynchronized = true;
             return Err(NetconfClientError::MessageIdMismatch {
                 expected: expected.to_string(),
-                actual: reply.message_id().unwrap_or("<none>").to_string(),
+                actual: actual.to_string(),
             });
         }
 
         if self.parse_replies && reply_is_failure(&reply, warnings_as_errors) {
-            return Err(NetconfClientError::Netconf(reply));
+            return Err(NetconfClientError::Netconf {
+                operation: operation.to_string(),
+                reply,
+            });
         }
         Ok(response)
     }
@@ -550,7 +575,7 @@ impl Connection {
                 Err(err) => return Err(self.invalidate_on_eof(err)),
             };
             if classify_incoming(&response) == Incoming::Notification {
-                debug!("buffered notification during RPC");
+                debug!("buffered notification during rpc");
                 self.buffer_notification(response);
                 continue;
             }
@@ -612,6 +637,43 @@ fn map_commit_eof(
     }
 }
 
+fn root_local_name(xml: &str) -> Option<&str> {
+    let mut rest = xml;
+    while let Some(idx) = rest.find('<') {
+        rest = &rest[idx + 1..];
+        if rest.starts_with('!') || rest.starts_with('?') || rest.starts_with('/') {
+            continue;
+        }
+        let name_end = rest
+            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .unwrap_or(rest.len());
+        let name = &rest[..name_end];
+        let local = name.rsplit(':').next().unwrap_or(name);
+        if !local.is_empty() {
+            return Some(local);
+        }
+    }
+    None
+}
+
+fn root_is_rpc(xml: &str) -> bool {
+    root_local_name(xml) == Some("rpc")
+}
+
+fn xml_body_start(xml: &str) -> usize {
+    if let Some(decl) = xml.find("<?xml")
+        && let Some(end) = xml[decl..].find("?>")
+    {
+        return decl + end + 2;
+    }
+    0
+}
+
+fn wrap_in_rpc(xml: &str, message_id: &str) -> String {
+    let (prolog, body) = xml.split_at(xml_body_start(xml));
+    format!("{prolog}<rpc xmlns=\"{NETCONF_URN}\" message-id=\"{message_id}\">{body}</rpc>")
+}
+
 fn request_message_id(xml: &str) -> Option<String> {
     for key in ["message-id=\"", "message-id='"] {
         if let Some(start) = xml.find(key) {
@@ -626,6 +688,33 @@ fn request_message_id(xml: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Local-name of the first child of `<rpc>`, or `"rpc"` if none is found.
+fn request_operation(xml: &str) -> String {
+    let mut rest = xml;
+    let mut seen_rpc = false;
+    while let Some(idx) = rest.find('<') {
+        rest = &rest[idx + 1..];
+        if rest.starts_with('!') || rest.starts_with('?') || rest.starts_with('/') {
+            continue;
+        }
+        let name_end = rest
+            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .unwrap_or(rest.len());
+        let name = &rest[..name_end];
+        let local = name.rsplit(':').next().unwrap_or(name);
+        if !seen_rpc {
+            if local == "rpc" {
+                seen_rpc = true;
+            }
+            continue;
+        }
+        if !local.is_empty() {
+            return local.to_string();
+        }
+    }
+    "rpc".to_string()
 }
 
 /// True when the document contains a `<commit>` or `<commit-configuration>`.
@@ -660,7 +749,10 @@ impl Drop for Connection {
 
 #[cfg(test)]
 mod tests {
-    use super::{Incoming, classify_incoming, request_is_commit, request_message_id};
+    use super::{
+        Incoming, classify_incoming, request_is_commit, request_message_id, request_operation,
+        root_is_rpc, wrap_in_rpc,
+    };
     use crate::message::capability_id;
     use crate::{CANDIDATE_CAP, URL_CAP};
 
@@ -699,6 +791,49 @@ mod tests {
             "<rpc><get><commit-id>1</commit-id></get></rpc>"
         ));
         assert!(!request_is_commit("<rpc><get/></rpc>"));
+    }
+
+    #[test]
+    fn wrap_in_rpc_adds_envelope_and_keeps_existing_rpc() {
+        assert!(root_is_rpc("<rpc><get/></rpc>"));
+        assert!(root_is_rpc(
+            r#"<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0"><nc:get/></nc:rpc>"#
+        ));
+        assert!(!root_is_rpc("<get-interface-information/>"));
+
+        let wrapped = wrap_in_rpc("<get-interface-information/>", "3");
+        assert_eq!(
+            wrapped,
+            concat!(
+                "<rpc xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\" message-id=\"3\">",
+                "<get-interface-information/>",
+                "</rpc>",
+            )
+        );
+        assert_eq!(request_operation(&wrapped), "get-interface-information");
+        assert_eq!(request_message_id(&wrapped).as_deref(), Some("3"));
+
+        let with_decl = wrap_in_rpc("<?xml version=\"1.0\"?>\n<get-interface-information/>", "1");
+        assert!(with_decl.starts_with("<?xml version=\"1.0\"?>"));
+        assert!(root_is_rpc(&with_decl));
+        assert_eq!(request_operation(&with_decl), "get-interface-information");
+    }
+
+    #[test]
+    fn request_operation_reads_first_child_of_rpc() {
+        assert_eq!(request_operation("<rpc><get-config/></rpc>"), "get-config");
+        assert_eq!(
+            request_operation(
+                r#"<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0"><nc:edit-config/></nc:rpc>"#
+            ),
+            "edit-config"
+        );
+        assert_eq!(
+            request_operation("<rpc message-id='1'><lock/></rpc>"),
+            "lock"
+        );
+        assert_eq!(request_operation("<rpc/>"), "rpc");
+        assert_eq!(request_operation("<hello/>"), "rpc");
     }
 
     #[test]

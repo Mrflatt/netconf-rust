@@ -68,8 +68,8 @@ the same way.
 3. If the server advertises `:base:1.1`, call `transport.upgrade()` → chunked
    framing (`\n#N\n...\n##\n`, [RFC 6242](https://www.rfc-editor.org/rfc/rfc6242.html)).
 4. Each RPC is write then loop receive. A `<notification>` is buffered and the
-   wait continues. The reply is parsed as [`RpcReply`]; the
-   `message-id` must match. Error-severity `<rpc-error>` becomes
+   wait continues. The reply is parsed as [`RpcReply`]; the `message-id` must
+   match when present (a missing id is accepted). Error-severity `<rpc-error>` becomes
    [`NetconfClientError::Netconf`]. Warning-only replies succeed unless
    [`Connection::set_warnings_as_errors`]. EOF after `<commit>` is [`NetconfClientError::CommitUnknown`].
 5. [`Connection::close_session`] ends the session and tears the transport down.
@@ -107,6 +107,17 @@ are supported on `get` / `get-config`. `has_capability` reflects the server
 Filter and `<config>` payloads reach the device byte for byte; everything the
 crate generates around them stays XML-escaped. [`RpcReply::errors`] exposes each
 `<rpc-error>`, including vendor tags outside RFC 6241.
+
+## Logging
+
+The crate uses the [`log`](https://docs.rs/log) facade.
+
+- `warn` / `error`: host-key policy, dropped session, unknown SSH algorithms
+- `debug`: ProxyJump hops, transport teardown
+- `trace`: full `<hello>` / RPC XML, framer writes, ssh-agent identity probes
+
+Wire dumps are `trace`, not `debug`. `RUST_LOG=netconf_async=debug` is session
+diagnostics; `RUST_LOG=netconf_async=trace` is the wire.
 
 ## Crate features
 

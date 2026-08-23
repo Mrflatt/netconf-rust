@@ -22,8 +22,13 @@ pub enum NetconfClientError {
     #[error("{0}")]
     SerializingFailure(String),
     /// Device returned one or more `<rpc-error>` elements.
-    #[error("remote procedure call failed:\n{0}")]
-    Netconf(#[from] message::RpcReply),
+    #[error("{operation} failed:\n{reply}")]
+    Netconf {
+        /// RPC local-name that failed (`get-config`, `edit-config`, …).
+        operation: String,
+        /// Parsed `<rpc-reply>`.
+        reply: message::RpcReply,
+    },
     /// Datastore name was not `running`, `candidate`, `startup`, or a URL.
     #[error("unknown datastore {}, (expected {:?})", unknown, expected)]
     UnknownDatastore {
@@ -75,7 +80,7 @@ pub enum NetconfClientError {
     MessageIdMismatch {
         /// `message-id` sent on the request.
         expected: String,
-        /// `message-id` on the reply, or `<none>` if the device omitted it.
+        /// `message-id` on the reply.
         actual: String,
     },
     /// Connection dropped after `<commit>` / `<commit-configuration>` was sent.

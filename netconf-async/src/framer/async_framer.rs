@@ -2,7 +2,7 @@ use crate::error::{NetconfClientError, NetconfClientResult};
 use crate::framer::{Framer, NETCONF_1_0_TERMINATOR};
 use async_trait::async_trait;
 use core::fmt;
-use log::debug;
+use log::{debug, trace};
 use memchr::memmem;
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -53,6 +53,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncFramer<T> {
         self.max_message_size = limit;
     }
 
+    /// Bytes already read from the channel (e.g. before subsystem Success).
+    pub(crate) fn push_incoming(&mut self, bytes: &[u8]) {
+        self.read_buffer.extend_from_slice(bytes);
+    }
+
     /// Borrow the underlying channel, e.g. to shut it down.
     pub fn channel_mut(&mut self) -> &mut T {
         &mut self.channel
@@ -64,10 +69,36 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncFramer<T> {
         }
     }
 
+    fn unexpected_eof(msg: &str) -> NetconfClientError {
+        io::Error::new(io::ErrorKind::UnexpectedEof, msg).into()
+    }
+
+    /// Pull `dest.len()` bytes, leftover from a prior 1.0 read first.
+    async fn read_exact_from_incoming(&mut self, dest: &mut [u8]) -> NetconfClientResult<()> {
+        let mut filled = 0;
+        while filled < dest.len() {
+            if self.read_buffer.is_empty() {
+                let mut buf = [0u8; READ_CHUNK];
+                let n = self.channel.read(&mut buf).await?;
+                if n == 0 {
+                    return Err(Self::unexpected_eof(
+                        "connection closed in NETCONF 1.1 chunk",
+                    ));
+                }
+                self.read_buffer.extend_from_slice(&buf[..n]);
+            }
+            let take = (dest.len() - filled).min(self.read_buffer.len());
+            dest[filled..filled + take].copy_from_slice(&self.read_buffer[..take]);
+            self.read_buffer.drain(..take);
+            filled += take;
+        }
+        Ok(())
+    }
+
     /// Read a `\n#N\n` chunk header, or `0` for the `\n##\n` end marker.
     async fn read_header(&mut self) -> NetconfClientResult<u32> {
         let mut buffer = [0u8; 2];
-        self.channel.read_exact(&mut buffer).await?;
+        self.read_exact_from_incoming(&mut buffer).await?;
         if buffer[0] != b'\n' {
             return Err(NetconfClientError::MalformedChunk {
                 expected: '\n',
@@ -86,7 +117,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncFramer<T> {
         let mut digits = 0usize;
         loop {
             let mut buffer = [0u8; 1];
-            self.channel.read_exact(&mut buffer).await?;
+            self.read_exact_from_incoming(&mut buffer).await?;
             let last_read = buffer[0];
             // Second `#` of the `\n##\n` end-of-chunks marker.
             if last_read == b'#' && digits == 0 {
@@ -113,25 +144,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncFramer<T> {
     }
 
     async fn read_chunked(&mut self) -> NetconfClientResult<String> {
+        let mut message = Vec::new();
         loop {
             let chunk_size = self.read_header().await? as usize;
             if chunk_size == 0 {
                 break;
             }
-            let filled = self.read_buffer.len();
-            if chunk_size > self.max_message_size - filled.min(self.max_message_size) {
+            if chunk_size > self.max_message_size.saturating_sub(message.len()) {
                 return Err(self.too_large());
             }
-            self.read_buffer.resize(filled + chunk_size, 0);
-            self.channel
-                .read_exact(&mut self.read_buffer[filled..])
-                .await?;
+            let start = message.len();
+            message.resize(start + chunk_size, 0);
+            self.read_exact_from_incoming(&mut message[start..]).await?;
         }
-        let response = String::from_utf8_lossy(&self.read_buffer)
-            .trim_end()
-            .to_string();
-        self.read_buffer.clear();
-        Ok(response)
+        Ok(String::from_utf8_lossy(&message).trim_end().to_string())
     }
 
     async fn read_end_of_message(&mut self) -> NetconfClientResult<String> {
@@ -147,6 +173,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncFramer<T> {
                     .trim_end()
                     .to_string();
                 self.read_buffer.drain(..end + terminator.len());
+                if !self.read_buffer.is_empty() {
+                    debug!(
+                        "1.0 leftover {} bytes after terminator",
+                        self.read_buffer.len()
+                    );
+                }
                 return Ok(response);
             }
             scanned = self.read_buffer.len().saturating_sub(terminator.len() - 1);
@@ -187,20 +219,27 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Framer for AsyncFramer<T> {
     }
 
     async fn write_async(&mut self, rpc: &str) -> NetconfClientResult<()> {
-        debug!("RPC:\n{}", rpc);
+        trace!("rpc:\n{}", rpc);
         let bytes = rpc.as_bytes();
         if self.upgraded {
-            self.channel
-                .write_all(format!("\n#{}\n", bytes.len()).as_bytes())
-                .await?;
-            self.channel.write_all(bytes).await?;
-            self.channel.write_all("\n##\n".as_bytes()).await?;
+            let header = format!("\n#{}\n", bytes.len());
+            let mut frame = Vec::with_capacity(header.len() + bytes.len() + 4);
+            frame.extend_from_slice(header.as_bytes());
+            frame.extend_from_slice(bytes);
+            frame.extend_from_slice(b"\n##\n");
+            debug!(
+                "1.1 write {} payload bytes (frame {})",
+                bytes.len(),
+                frame.len()
+            );
+            self.channel.write_all(&frame).await?;
         } else {
             self.channel.write_all(bytes).await?;
             self.channel
                 .write_all(NETCONF_1_0_TERMINATOR.as_bytes())
                 .await?;
         }
+        self.channel.flush().await?;
         Ok(())
     }
 }
@@ -431,5 +470,24 @@ mod tests {
         let mut framer = AsyncFramer::new(channel);
         assert_eq!(framer.read_async().await.unwrap(), "<one/>");
         assert_eq!(framer.read_async().await.unwrap(), "<two/>");
+    }
+
+    fn chunked(xml: &str) -> Vec<u8> {
+        let mut out = format!("\n#{}\n", xml.len()).into_bytes();
+        out.extend_from_slice(xml.as_bytes());
+        out.extend_from_slice(b"\n##\n");
+        out
+    }
+
+    #[tokio::test]
+    async fn chunked_read_uses_bytes_left_after_1_0_hello() {
+        let reply =
+            "<rpc-reply xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\"><ok/></rpc-reply>";
+        let mut wire = b"<hello/>]]>]]>".to_vec();
+        wire.extend_from_slice(&chunked(reply));
+        let mut framer = AsyncFramer::new(Cursor::new(wire));
+        assert_eq!(framer.read_async().await.unwrap(), "<hello/>");
+        framer.upgrade().await;
+        assert_eq!(framer.read_async().await.unwrap(), reply);
     }
 }

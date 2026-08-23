@@ -227,9 +227,10 @@ async fn rpc_error_surfaces_a_typed_tag() {
     let mut conn = Connection::new(device.transport).await.unwrap();
 
     let err = conn.lock(Datastore::Candidate).await.unwrap_err();
-    let NetconfClientError::Netconf(reply) = err else {
+    let NetconfClientError::Netconf { operation, reply } = err else {
         panic!("expected a NETCONF error, got {err:?}");
     };
+    assert_eq!(operation, "lock");
     assert_eq!(reply.errors().len(), 1);
     assert_eq!(reply.errors()[0].error_tag, ErrorTag::LockDenied);
     assert_eq!(
@@ -339,6 +340,19 @@ async fn eof_after_non_commit_is_io() {
 }
 
 #[tokio::test]
+async fn reply_without_message_id_is_accepted() {
+    let reply = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"><ok/></rpc-reply>"#;
+    let mut script = handshake(true);
+    script.push(Step::ReplyAsIs(reply.to_string()));
+    script.push(Step::Reply(OK_REPLY.to_string()));
+    let device = device(script);
+    let mut conn = Connection::new(device.transport).await.unwrap();
+
+    conn.lock(Datastore::Candidate).await.unwrap();
+    conn.unlock(Datastore::Candidate).await.unwrap();
+}
+
+#[tokio::test]
 async fn reply_with_wrong_message_id_fails_and_desynchronizes() {
     let stale = r#"<rpc-reply message-id="999" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"><ok/></rpc-reply>"#;
     let mut script = handshake(true);
@@ -400,9 +414,10 @@ async fn warnings_as_errors_fails_a_warning_only_reply() {
     conn.set_warnings_as_errors(true);
 
     let err = conn.commit().await.unwrap_err();
-    let NetconfClientError::Netconf(reply) = err else {
+    let NetconfClientError::Netconf { operation, reply } = err else {
         panic!("expected a NETCONF error, got {err:?}");
     };
+    assert_eq!(operation, "commit");
     assert!(reply.has_warnings());
     assert!(!reply.has_errors());
 }
@@ -453,6 +468,34 @@ async fn second_rpc_uses_the_next_integer_message_id() {
         sent[2].contains("message-id=\"2\""),
         "second rpc:\n{}",
         sent[2]
+    );
+}
+
+#[tokio::test]
+async fn raw_rpc_wraps_a_bare_operation() {
+    let mut script = handshake(true);
+    script.push(Step::Reply(OK_REPLY.to_string()));
+    let device = device(script);
+    let mut conn = Connection::new(device.transport).await.unwrap();
+
+    conn.raw_rpc("<get-interface-information/>").await.unwrap();
+
+    let sent = device.sent.lock().unwrap();
+    assert!(
+        sent[1]
+            .contains("<rpc xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\" message-id=\"1\">"),
+        "wrapped rpc:\n{}",
+        sent[1]
+    );
+    assert!(
+        sent[1].contains("<get-interface-information/>"),
+        "operation missing:\n{}",
+        sent[1]
+    );
+    assert!(
+        !sent[1].contains("<rpc><rpc"),
+        "double-wrapped:\n{}",
+        sent[1]
     );
 }
 
