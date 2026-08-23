@@ -89,7 +89,9 @@ async fn main() -> netconf_async::NetconfClientResult<()> {
 
 `Connection::new` performs the `<hello>` exchange and upgrades the framer when the server advertises `urn:ietf:params:netconf:base:1.1`. Call `close_session` when you are done; dropping an open session only logs a warning, because a clean shutdown has to await I/O.
 
-Other methods on `Connection`: `edit_config`, `copy_config`, `delete_config`, `lock`, `unlock`, `validate`, `commit`, `confirmed_commit`, `confirm_commit`, `cancel_commit`, `discard_changes`, `kill_session`, `raw_rpc`, `notification`. `has_capability` reflects the server `<hello>`.
+Other methods on `Connection`: `edit_config`, `copy_config`, `delete_config`, `lock`, `unlock`, `validate`, `commit`, `confirmed_commit`, `confirm_commit`, `cancel_commit`, `discard_changes`, `kill_session`, `raw_rpc`, `create_subscription`, `recv_notification`, `drain_notifications`, `notification`. `has_capability` reflects the server `<hello>`.
+
+`create_subscription` leaves the session free for later RPCs. Notifications that arrive while a `get` / `edit_config` waits go into a buffer (`drain_notifications`). `notification()` is the exclusive listen loop (CLI). Some devices advertise `:interleave` and then ignore RPCs on that session — use two connections there.
 
 ### Features
 
@@ -127,7 +129,8 @@ netconf-cli commit --host router.example --username netconf --id <persist-id>
 # raw RPC document (or a directory of them, executed in name order)
 netconf-cli rpc --host router.example --username netconf -f custom-rpc.xml
 
-# notifications (Ctrl-C to stop)
+# notifications (Ctrl-C to stop). Edit/get at the same time = second process
+# (second SSH session). Same-session interleave is a library API for MCP.
 netconf-cli notification --host router.example --username netconf
 netconf-cli notification --host router.example --username netconf --get   # list streams
 

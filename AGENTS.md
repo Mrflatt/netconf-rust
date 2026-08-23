@@ -96,7 +96,7 @@ cargo test -p netconf-async test_deserialize_rpc_reply -- --nocapture
             └── update.rs      # update subcommand (no device session)
 ```
 
-Implemented `Connection` RPCs: `get`, `get-config`, `edit_config`, `copy_config`, `delete_config`, `lock`, `unlock`, `validate`, `commit`, `confirmed_commit`, `confirm_commit`, `cancel_commit`, `discard_changes`, `close_session`, `kill_session`, `raw_rpc`, `notification` (`<create-subscription>`, RFC 5277).
+Implemented `Connection` RPCs: `get`, `get-config`, `edit_config`, `copy_config`, `delete_config`, `lock`, `unlock`, `validate`, `commit`, `confirmed_commit`, `confirm_commit`, `cancel_commit`, `discard_changes`, `close_session`, `kill_session`, `raw_rpc`, `create_subscription`, `recv_notification` / `drain_notifications`, `notification` (listen loop; RFC 5277).
 
 Implemented CLI subcommands: `get`, `get-config`, `edit`, `copy`, `commit`, `rpc`, `notification`, `update`.
 `edit` orchestrates lock → edit-config (all `--file` XML, name order) → validate → commit once → unlock → optional running→startup copy. `rpc` executes each `--file` XML in name order. `commit` confirms or cancels a persist confirmed-commit. `update` polls GitHub releases and does not open a device session.
@@ -130,7 +130,7 @@ Session flow:
 1. SSH connect, request subsystem `netconf`.
 2. Exchange `<hello>` with **1.0** framing (`]]>]]>`).
 3. If the server advertises `urn:ietf:params:netconf:base:1.1`, call `transport.upgrade()` → chunked framing (`\n#N\n...\n##\n`, RFC 6242).
-4. Each RPC is `write_and_receive`. Reply is parsed as `RpcReply`; `message-id` must match (mismatch desynchronizes). Error-severity `<rpc-error>` becomes `NetconfClientError::Netconf`. Warning-only is success unless `set_warnings_as_errors(true)`. EOF after `<commit>` / `<commit-configuration>` is `CommitUnknown` — thread `is_commit` through the send, never a session flag.
+4. Each RPC is write then loop receive. A `<notification>` is buffered (cap 256) and the wait continues. Reply is parsed as `RpcReply`; `message-id` must match (mismatch desynchronizes). Error-severity `<rpc-error>` becomes `NetconfClientError::Netconf`. Warning-only is success unless `set_warnings_as_errors(true)`. EOF after `<commit>` / `<commit-configuration>` is `CommitUnknown` — thread `is_commit` through the send, never a session flag. After `create_subscription`, later RPCs stay on the same session; `notification()` is the exclusive listen loop.
 5. `close_session` sends the RPC and then closes the transport. `Drop` cannot await I/O, so it only warns when the session is still open.
 
 `SshTransport::connect(SshConfig)` owns TCP, auth (`SshAuth::{Password,Agent,KeyFile}`), ProxyJump chain (`SshConfig::jump` appends hops), host-key policy (`RejectAll` default, `Fingerprint`, `KnownHosts`, `AcceptAll` lab opt-in), and session knobs (`SshSessionOpts`: compression, keepalive, kex/cipher/mac prefs). Each hop is a russh `direct-tcpip` channel used as the next handshake stream. Do not leak `russh` types (`NetconfClientError::Ssh` is a `String`). CLI maps `IdentityFile`. Host keys default to `accept-new` (pin unknown, reject changed). `--strict-host-key-checking` / `StrictHostKeyChecking`: `yes`, `accept-new`, `no`.

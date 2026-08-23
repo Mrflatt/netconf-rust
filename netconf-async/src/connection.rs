@@ -1,18 +1,22 @@
 //! NETCONF session: hello exchange, typed RPCs, and teardown.
 
-use crate::NETCONF_BASE_11_CAP;
 use crate::error::{NetconfClientError, NetconfClientResult};
 use crate::message::{
     CopySource, Datastore, DefaultOperation, EditContent, ErrorOption, Filter, Hello, Rpc,
     RpcOperation, RpcReply, Source, TestOption, WithDefaultsValue, capability_id, from_xml,
 };
 use crate::transport::Transport;
+use crate::{INTERLEAVE_CAP, NETCONF_BASE_11_CAP, NOTIFICATION_CAP};
 use core::fmt;
 #[cfg(feature = "tokio")]
 use core::time::Duration;
 use log::{debug, warn};
+use std::collections::VecDeque;
 #[cfg(feature = "tokio")]
 use tokio::sync::mpsc::Sender;
+
+/// Drop the oldest notification when this many sit unread.
+const MAX_NOTIFICATION_BUFFER: usize = 256;
 
 /// Active NETCONF session on top of a [`Transport`].
 ///
@@ -31,6 +35,7 @@ pub struct Connection {
     next_message_id: u64,
     is_closed: bool,
     desynchronized: bool,
+    notification_buffer: VecDeque<String>,
     #[cfg(feature = "tokio")]
     timeout: Option<Duration>,
 }
@@ -43,7 +48,8 @@ impl fmt::Debug for Connection {
             .field("parse_replies", &self.parse_replies)
             .field("warnings_as_errors", &self.warnings_as_errors)
             .field("is_closed", &self.is_closed)
-            .field("desynchronized", &self.desynchronized);
+            .field("desynchronized", &self.desynchronized)
+            .field("notification_buffer", &self.notification_buffer.len());
         #[cfg(feature = "tokio")]
         dbg.field("timeout", &self.timeout);
         dbg.finish_non_exhaustive()
@@ -66,6 +72,7 @@ impl Connection {
             next_message_id: 1,
             is_closed: false,
             desynchronized: false,
+            notification_buffer: VecDeque::new(),
             #[cfg(feature = "tokio")]
             timeout: None,
         };
@@ -343,17 +350,75 @@ impl Connection {
         Ok((response, warnings))
     }
 
-    /// Issues the `<create-subscription>` operation as defined in [RFC5277 2.1.1](https://www.rfc-editor.org/rfc/rfc5277.html#section-2.1.1)
-    /// for initiating an event notification subscription that will send asynchronous event notifications to the initiator.
+    /// `<create-subscription>` ([RFC5277 2.1.1](https://www.rfc-editor.org/rfc/rfc5277.html#section-2.1.1)).
     ///
-    /// This requires the device to support the [notification capability](https://www.rfc-editor.org/rfc/rfc5277.html#section-3.1.1).
+    /// Does not take over the session. Later RPCs (`get`, `edit_config`, …) stay
+    /// legal; notifications that arrive while those RPCs wait are buffered and
+    /// come back from [`Self::drain_notifications`] / [`Self::recv_notification`].
     ///
-    /// Forwards notifications to `sender` until the device closes the stream or
-    /// the receiver is dropped. The returned future is cancel-safe to drop, so
-    /// wire up shutdown with `tokio::select!` in the calling application.
+    /// Missing `:interleave` is logged, not refused. Some devices advertise it
+    /// and then ignore RPCs on the subscribed session — use a second connection
+    /// there. `start_time` / `stop_time` are RFC 3339 replay bounds; `stop_time`
+    /// requires `start_time`.
+    pub async fn create_subscription(
+        &mut self,
+        stream: Option<&str>,
+        filter: Option<Filter>,
+        start_time: Option<&str>,
+        stop_time: Option<&str>,
+    ) -> NetconfClientResult<String> {
+        if !self.has_capability(NOTIFICATION_CAP) {
+            debug!("server did not advertise :notification; create-subscription may fail");
+        }
+        if !self.has_capability(INTERLEAVE_CAP) {
+            debug!("server did not advertise :interleave; RPCs during this subscription may fail");
+        }
+        let rpc = Rpc::new_with_operation(RpcOperation::new_create_subscription(
+            stream, filter, start_time, stop_time,
+        )?);
+        self.run_rpc(rpc).await
+    }
+
+    /// Take every notification buffered during earlier RPCs.
+    pub fn drain_notifications(&mut self) -> Vec<String> {
+        self.notification_buffer.drain(..).collect()
+    }
+
+    /// True when [`Self::drain_notifications`] would return a non-empty list.
+    pub fn has_notifications(&self) -> bool {
+        !self.notification_buffer.is_empty()
+    }
+
+    /// Next notification: buffer first, otherwise one framed message.
     ///
-    /// `start_time` / `stop_time` are RFC 3339 replay bounds ([RFC5277 2.1.1](https://www.rfc-editor.org/rfc/rfc5277.html#section-2.1.1)).
-    /// `stop_time` requires `start_time`.
+    /// Unexpected `<rpc-reply>` / other documents are logged and skipped.
+    /// Transport EOF is an error. This wait is not bounded by
+    /// [`Self::set_timeout`].
+    pub async fn recv_notification(&mut self) -> NetconfClientResult<String> {
+        if let Some(notification) = self.notification_buffer.pop_front() {
+            return Ok(notification);
+        }
+        if self.desynchronized {
+            return Err(NetconfClientError::SessionDesynchronized);
+        }
+        loop {
+            let message = self.transport.receive().await?;
+            if classify_incoming(&message) == Incoming::Notification {
+                return Ok(message);
+            }
+            warn!("discarding unexpected message while waiting for notification");
+        }
+    }
+
+    /// Subscribe, then forward notifications to `sender` until the device
+    /// closes or the receiver is dropped.
+    ///
+    /// Holds `&mut self` for the whole listen loop, so this connection cannot
+    /// run other RPCs until the future ends. For interleaved RPCs (MCP, a
+    /// caller that `get`s after subscribe) use [`Self::create_subscription`]
+    /// and [`Self::drain_notifications`] / [`Self::recv_notification`] instead.
+    ///
+    /// Cancel-safe to drop; wire shutdown with `tokio::select!`.
     #[cfg(feature = "tokio")]
     #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
     pub async fn notification(
@@ -364,22 +429,28 @@ impl Connection {
         start_time: Option<&str>,
         stop_time: Option<&str>,
     ) -> NetconfClientResult<()> {
-        let notification = Rpc::new_with_operation(RpcOperation::new_create_subscription(
-            stream, filter, start_time, stop_time,
-        )?);
-        self.run_rpc(notification).await?;
+        self.create_subscription(stream, filter, start_time, stop_time)
+            .await?;
         self.run_notification_loop(sender).await
     }
 
     #[cfg(feature = "tokio")]
     async fn run_notification_loop(&mut self, sender: Sender<String>) -> NetconfClientResult<()> {
         loop {
-            let notification = self.transport.receive().await?;
+            let notification = self.recv_notification().await?;
             if sender.send(notification).await.is_err() {
                 // Receiver is gone, so nothing is listening any more.
                 return Ok(());
             }
         }
+    }
+
+    fn buffer_notification(&mut self, notification: String) {
+        if self.notification_buffer.len() >= MAX_NOTIFICATION_BUFFER {
+            warn!("notification buffer full ({MAX_NOTIFICATION_BUFFER}); dropping oldest");
+            self.notification_buffer.pop_front();
+        }
+        self.notification_buffer.push_back(notification);
     }
 
     async fn run_rpc(&mut self, mut rpc: Rpc) -> NetconfClientResult<String> {
@@ -445,7 +516,7 @@ impl Connection {
         is_commit: bool,
     ) -> NetconfClientResult<String> {
         let result = if let Some(timeout) = self.timeout {
-            match tokio::time::timeout(timeout, self.transport.write_and_receive(request)).await {
+            match tokio::time::timeout(timeout, self.write_and_read_reply(request)).await {
                 Ok(result) => result,
                 Err(_) => {
                     // The reply may still land and would be read as the answer to
@@ -455,7 +526,7 @@ impl Connection {
                 }
             }
         } else {
-            self.transport.write_and_receive(request).await
+            self.write_and_read_reply(request).await
         };
         map_commit_eof(result, is_commit)
     }
@@ -466,8 +537,65 @@ impl Connection {
         request: &str,
         is_commit: bool,
     ) -> NetconfClientResult<String> {
-        map_commit_eof(self.transport.write_and_receive(request).await, is_commit)
+        map_commit_eof(self.write_and_read_reply(request).await, is_commit)
     }
+
+    async fn write_and_read_reply(&mut self, request: &str) -> NetconfClientResult<String> {
+        if let Err(err) = self.transport.write(request).await {
+            return Err(self.invalidate_on_eof(err));
+        }
+        loop {
+            let response = match self.transport.receive().await {
+                Ok(response) => response,
+                Err(err) => return Err(self.invalidate_on_eof(err)),
+            };
+            if classify_incoming(&response) == Incoming::Notification {
+                debug!("buffered notification during RPC");
+                self.buffer_notification(response);
+                continue;
+            }
+            return Ok(response);
+        }
+    }
+
+    fn invalidate_on_eof(&mut self, err: NetconfClientError) -> NetconfClientError {
+        if err.is_unexpected_eof() {
+            self.desynchronized = true;
+        }
+        err
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Incoming {
+    Notification,
+    Other,
+}
+
+fn classify_incoming(xml: &str) -> Incoming {
+    match first_element_local_name(xml) {
+        Some("notification") => Incoming::Notification,
+        _ => Incoming::Other,
+    }
+}
+
+fn first_element_local_name(xml: &str) -> Option<&str> {
+    let mut rest = xml;
+    while let Some(idx) = rest.find('<') {
+        rest = &rest[idx + 1..];
+        if rest.starts_with('!') || rest.starts_with('?') || rest.starts_with('/') {
+            continue;
+        }
+        let name_end = rest
+            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .unwrap_or(rest.len());
+        let name = &rest[..name_end];
+        let local = name.rsplit(':').next().unwrap_or(name);
+        if !local.is_empty() {
+            return Some(local);
+        }
+    }
+    None
 }
 
 fn reply_is_failure(reply: &RpcReply, warnings_as_errors: bool) -> bool {
@@ -532,7 +660,7 @@ impl Drop for Connection {
 
 #[cfg(test)]
 mod tests {
-    use super::{request_is_commit, request_message_id};
+    use super::{Incoming, classify_incoming, request_is_commit, request_message_id};
     use crate::message::capability_id;
     use crate::{CANDIDATE_CAP, URL_CAP};
 
@@ -571,5 +699,35 @@ mod tests {
             "<rpc><get><commit-id>1</commit-id></get></rpc>"
         ));
         assert!(!request_is_commit("<rpc><get/></rpc>"));
+    }
+
+    #[test]
+    fn classify_incoming_uses_root_local_name() {
+        assert_eq!(
+            classify_incoming(
+                r#"<notification xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0"/>"#
+            ),
+            Incoming::Notification
+        );
+        assert_eq!(
+            classify_incoming(
+                r#"<nc:notification xmlns:nc="urn:ietf:params:xml:ns:netconf:notification:1.0"><eventTime>t</eventTime></nc:notification>"#
+            ),
+            Incoming::Notification
+        );
+        assert_eq!(
+            classify_incoming(r#"<?xml version="1.0"?><notification/>"#),
+            Incoming::Notification
+        );
+        assert_eq!(
+            classify_incoming(r#"<rpc-reply message-id="1"><ok/></rpc-reply>"#),
+            Incoming::Other
+        );
+        assert_eq!(
+            classify_incoming(
+                r#"<rpc-reply><notification xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0"/></rpc-reply>"#
+            ),
+            Incoming::Other
+        );
     }
 }

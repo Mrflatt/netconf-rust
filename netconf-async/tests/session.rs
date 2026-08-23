@@ -330,6 +330,12 @@ async fn eof_after_non_commit_is_io() {
         matches!(err, NetconfClientError::Io(_)),
         "expected an I/O error after EOF on a non-commit reply, got {err:?}"
     );
+
+    let err = conn.close_session().await.unwrap_err();
+    assert!(
+        matches!(err, NetconfClientError::SessionDesynchronized),
+        "expected desynchronized after EOF, got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -496,4 +502,58 @@ async fn notifications_stop_when_the_receiver_is_dropped() {
         .await
         .unwrap();
     assert!(received.await.unwrap().unwrap().contains("eventTime"));
+}
+
+const NOTIFICATION: &str = r#"<notification xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0"><eventTime>2026-01-01T00:00:00Z</eventTime><event/></notification>"#;
+const PREFIXED_NOTIFICATION: &str = r#"<nc:notification xmlns:nc="urn:ietf:params:xml:ns:netconf:notification:1.0"><nc:eventTime>2026-01-01T00:00:00Z</nc:eventTime></nc:notification>"#;
+
+#[tokio::test]
+async fn rpc_during_subscription_buffers_interleaved_notifications() {
+    let mut script = handshake(true);
+    script.extend([
+        Step::Reply(OK_REPLY.to_string()),
+        Step::Push(NOTIFICATION.to_string()),
+        Step::Push(PREFIXED_NOTIFICATION.to_string()),
+        Step::Reply(OK_REPLY.to_string()),
+    ]);
+    let device = device(script);
+    let mut conn = Connection::new(device.transport).await.unwrap();
+
+    conn.create_subscription(Some("NETCONF"), None, None, None)
+        .await
+        .unwrap();
+    assert!(!conn.has_notifications());
+
+    let reply = conn.get(None, None).await.unwrap();
+    assert!(reply.contains("<ok/>"), "{reply}");
+
+    let buffered = conn.drain_notifications();
+    assert_eq!(buffered.len(), 2, "{buffered:?}");
+    assert!(buffered[0].contains("eventTime"));
+    assert!(buffered[1].contains("nc:notification") || buffered[1].contains("eventTime"));
+    assert!(!conn.has_notifications());
+}
+
+#[tokio::test]
+async fn recv_notification_returns_buffer_then_wire() {
+    let mut script = handshake(true);
+    script.extend([
+        Step::Reply(OK_REPLY.to_string()),
+        Step::Push(NOTIFICATION.to_string()),
+        Step::Reply(OK_REPLY.to_string()),
+        Step::Push(PREFIXED_NOTIFICATION.to_string()),
+        Step::GoQuiet,
+    ]);
+    let device = device(script);
+    let mut conn = Connection::new(device.transport).await.unwrap();
+
+    conn.create_subscription(Some("NETCONF"), None, None, None)
+        .await
+        .unwrap();
+    conn.get(None, None).await.unwrap();
+
+    let first = conn.recv_notification().await.unwrap();
+    assert!(first.contains("eventTime"));
+    let second = conn.recv_notification().await.unwrap();
+    assert!(second.contains("eventTime"));
 }

@@ -67,7 +67,8 @@ the same way.
 2. Exchange `<hello>` with **1.0** framing (`]]>]]>`).
 3. If the server advertises `:base:1.1`, call `transport.upgrade()` → chunked
    framing (`\n#N\n...\n##\n`, [RFC 6242](https://www.rfc-editor.org/rfc/rfc6242.html)).
-4. Each RPC is `write_and_receive`. The reply is parsed as [`RpcReply`]; the
+4. Each RPC is write then loop receive. A `<notification>` is buffered and the
+   wait continues. The reply is parsed as [`RpcReply`]; the
    `message-id` must match. Error-severity `<rpc-error>` becomes
    [`NetconfClientError::Netconf`]. Warning-only replies succeed unless
    [`Connection::set_warnings_as_errors`]. EOF after `<commit>` is [`NetconfClientError::CommitUnknown`].
@@ -95,7 +96,9 @@ Default NETCONF-over-SSH port is **830**.
 | `discard_changes` | `<discard-changes>` |
 | `close_session` / `kill_session` | session control |
 | `raw_rpc` | caller-supplied XML |
-| `notification` | `<create-subscription>` ([RFC 5277](https://www.rfc-editor.org/rfc/rfc5277.html)) |
+| `create_subscription` | `<create-subscription>` ([RFC 5277](https://www.rfc-editor.org/rfc/rfc5277.html)); session stays usable |
+| `recv_notification` / `drain_notifications` | pull buffered or next `<notification>` |
+| `notification` | subscribe + exclusive listen loop (holds `&mut self`) |
 
 Subtree filters and `with-defaults` ([RFC 6243](https://www.rfc-editor.org/rfc/rfc6243.html))
 are supported on `get` / `get-config`. `has_capability` reflects the server
