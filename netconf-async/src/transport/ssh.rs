@@ -257,7 +257,7 @@ impl SshJump {
     }
 }
 
-/// SSH connection parameters for [`SSHTransport::connect`].
+/// SSH connection parameters for [`SshTransport::connect`].
 ///
 /// Host-key policy defaults to [`HostKeyPolicy::RejectAll`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -348,7 +348,7 @@ impl SshConfig {
 /// Authenticated ProxyJump chain that can open many device sessions.
 ///
 /// Clone and share across tasks. Dropping the last clone closes the jump
-/// SSH sessions. Device [`SSHTransport::close`] does not disconnect the jump.
+/// SSH sessions. Device [`SshTransport::close`] does not disconnect the jump.
 ///
 /// Use [`JumpPool`] to share one chain across many devices.
 #[derive(Clone)]
@@ -407,7 +407,7 @@ impl JumpSession {
     /// Open a NETCONF session to `config.host` through this jump chain.
     ///
     /// `config.jumps` are ignored; the path is this session.
-    pub async fn connect_device(&self, config: SshConfig) -> NetconfClientResult<SSHTransport> {
+    pub async fn connect_device(&self, config: SshConfig) -> NetconfClientResult<SshTransport> {
         let stream = {
             let handle = self.last.lock().await;
             if handle.is_closed() {
@@ -472,7 +472,7 @@ impl JumpPool {
     /// Open a NETCONF session to `config.host` through the shared jump session.
     ///
     /// `config.jumps` are ignored; the path is this pool.
-    pub async fn connect_device(&self, config: SshConfig) -> NetconfClientResult<SSHTransport> {
+    pub async fn connect_device(&self, config: SshConfig) -> NetconfClientResult<SshTransport> {
         self.session().await?.connect_device(config).await
     }
 
@@ -493,20 +493,26 @@ impl JumpPool {
 /// NETCONF-over-SSH session on a russh channel.
 ///
 /// Default NETCONF port is **830**; pass it in [`SshConfig::new`].
-pub struct SSHTransport {
+pub struct SshTransport {
     session: Handle<ClientHandler>,
     framer: AsyncFramer<ChannelStream<client::Msg>>,
     /// Keeps the ProxyJump chain alive for the life of the device channel.
     _jumps: Option<JumpSession>,
 }
 
-impl SSHTransport {
+impl fmt::Debug for SshTransport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SshTransport").finish_non_exhaustive()
+    }
+}
+
+impl SshTransport {
     /// TCP connect, authenticate, verify the host key, request subsystem `netconf`.
     ///
     /// Optional ProxyJump chain. Host-key policy defaults to
     /// [`HostKeyPolicy::RejectAll`]. Share a [`JumpPool`] when many devices
     /// use the same hops.
-    pub async fn connect(config: SshConfig) -> NetconfClientResult<SSHTransport> {
+    pub async fn connect(config: SshConfig) -> NetconfClientResult<SshTransport> {
         if config.jumps.is_empty() {
             let stream = connect_tcp(&config.host, config.port).await?;
             let session = handshake_and_auth(stream, target_from_config(&config)).await?;
@@ -520,7 +526,7 @@ impl SSHTransport {
 }
 
 #[async_trait]
-impl Transport for SSHTransport {
+impl Transport for SshTransport {
     async fn receive(&mut self) -> NetconfClientResult<String> {
         self.framer.read_async().await
     }
@@ -668,13 +674,13 @@ where
     Ok(session)
 }
 
-async fn open_netconf(session: Handle<ClientHandler>) -> NetconfClientResult<SSHTransport> {
+async fn open_netconf(session: Handle<ClientHandler>) -> NetconfClientResult<SshTransport> {
     let channel = session.channel_open_session().await.map_err(map_russh)?;
     channel
         .request_subsystem(true, "netconf")
         .await
         .map_err(map_russh)?;
-    Ok(SSHTransport {
+    Ok(SshTransport {
         session,
         framer: AsyncFramer::new(channel.into_stream()),
         _jumps: None,

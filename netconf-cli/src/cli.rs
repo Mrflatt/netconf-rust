@@ -8,7 +8,7 @@ use futures::stream::FuturesUnordered;
 use log::{debug, error, info};
 use netconf_async::connection::Connection;
 use netconf_async::error::{NetconfClientError, NetconfClientResult};
-use netconf_async::transport::ssh::{JumpPool, SSHTransport, SshJump};
+use netconf_async::transport::ssh::{JumpPool, SshJump, SshTransport};
 use ssh2_config::{DefaultAlgorithms, HostParams};
 use std::sync::Arc;
 use std::time::Instant;
@@ -73,7 +73,7 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<()> {
             })?;
             let ssh_transport = match pool {
                 Some(pool) => pool.connect_device(ssh_config).await?,
-                None => SSHTransport::connect(ssh_config).await?,
+                None => SshTransport::connect(ssh_config).await?,
             };
             let mut connection = Connection::new(ssh_transport).await?;
             if let Some(timeout) = cfg_clone.inner.timeout {

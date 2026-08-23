@@ -1,76 +1,4 @@
-//! Async [NETCONF](https://www.rfc-editor.org/rfc/rfc6241.html) client.
-//!
-//! Talk to routers and switches over SSH using the `netconf` subsystem. The
-//! crate handles the `<hello>` exchange, base 1.0 / 1.1 framing, and typed RPCs.
-//!
-//! ```toml
-//! [dependencies]
-//! netconf-async = "0.1"
-//! ```
-//!
-//! # Example
-//!
-//! ```no_run
-//! use netconf_async::connection::Connection;
-//! use netconf_async::message::{Datastore, Filter};
-//! use netconf_async::transport::ssh::{HostKeyPolicy, SshAuth, SshConfig, SSHTransport};
-//!
-//! # async fn run() -> netconf_async::error::NetconfClientResult<()> {
-//! let transport = SSHTransport::connect(
-//!     SshConfig::new("192.0.2.10", 830, "netconf", SshAuth::password("secret"))
-//!         .host_key(HostKeyPolicy::Fingerprint("SHA256:base64fingerprint".into())),
-//! ).await?;
-//! let mut conn = Connection::new(transport).await?;
-//!
-//! let running = conn.get_config(Datastore::Running, None, None).await?;
-//! println!("{running}");
-//!
-//! let filter = Filter::subtree(
-//!     r#"<system xmlns="urn:ietf:params:xml:ns:yang:ietf-system"/>"#,
-//! );
-//! let filtered = conn.get(Some(filter), None).await?;
-//! println!("{filtered}");
-//!
-//! conn.close_session().await?;
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! [`Connection::new`](connection::Connection::new) performs the `<hello>`
-//! exchange and upgrades the framer when the server advertises
-//! [`NETCONF_BASE_11_CAP`]. A clean shutdown needs to await I/O, so
-//! [`close_session`](connection::Connection::close_session) is not something
-//! [`Drop`] can do for you; dropping an open session only logs a warning.
-//!
-//! [`SSHTransport::connect`](transport::ssh::SSHTransport::connect) takes
-//! [`SshAuth`](transport::ssh::SshAuth) (password, agent, or key file) and an
-//! optional ProxyJump chain. Host-key policy defaults to
-//! [`RejectAll`](transport::ssh::HostKeyPolicy::RejectAll); pin a fingerprint
-//! or a `known_hosts` file. Share a [`JumpPool`](transport::ssh::JumpPool)
-//! when many devices use the same hops. A custom byte pipe implements
-//! [`Transport`](transport::Transport).
-//!
-//! # Session flow
-//!
-//! 1. SSH connect, request subsystem `netconf`.
-//! 2. Exchange `<hello>` with **1.0** framing (`]]>]]>`).
-//! 3. If the server advertises [`NETCONF_BASE_11_CAP`], upgrade to chunked
-//!    framing ([RFC 6242](https://www.rfc-editor.org/rfc/rfc6242.html)).
-//! 4. Each RPC is written and the reply parsed as
-//!    [`RpcReply`](message::RpcReply). The reply `message-id` must match.
-//!    Error-severity `<rpc-error>` becomes
-//!    [`NetconfClientError::Netconf`](error::NetconfClientError::Netconf);
-//!    warning-only replies succeed unless
-//!    [`set_warnings_as_errors`](connection::Connection::set_warnings_as_errors).
-//! 5. [`close_session`](connection::Connection::close_session) ends the session
-//!    and tears the transport down.
-//!
-//! Default NETCONF-over-SSH port is **830**.
-//!
-//! Notifications use `<create-subscription>`
-//! ([RFC 5277](https://www.rfc-editor.org/rfc/rfc5277.html)).
-//! `with-defaults` follows [RFC 6243](https://www.rfc-editor.org/rfc/rfc6243.html).
-
+#![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -79,6 +7,16 @@ pub mod error;
 pub mod framer;
 pub mod message;
 pub mod transport;
+
+pub use connection::Connection;
+pub use error::{NetconfClientError, NetconfClientResult};
+pub use message::{Datastore, Filter, RpcReply};
+pub use transport::Transport;
+
+#[cfg(feature = "ssh")]
+pub use transport::ssh::{
+    HostKeyPolicy, JumpPool, JumpSession, SshAuth, SshConfig, SshJump, SshSessionOpts, SshTransport,
+};
 
 /// XML namespace for NETCONF 1.0 messages ([RFC6241](https://www.rfc-editor.org/rfc/rfc6241.html)).
 pub const NETCONF_URN: &str = "urn:ietf:params:xml:ns:netconf:base:1.0";

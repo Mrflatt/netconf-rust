@@ -7,6 +7,7 @@ use crate::message::{
     RpcOperation, RpcReply, Source, TestOption, WithDefaultsValue, capability_id, from_xml,
 };
 use crate::transport::Transport;
+use core::fmt;
 #[cfg(feature = "tokio")]
 use core::time::Duration;
 use log::{debug, warn};
@@ -32,6 +33,21 @@ pub struct Connection {
     desynchronized: bool,
     #[cfg(feature = "tokio")]
     timeout: Option<Duration>,
+}
+
+impl fmt::Debug for Connection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut dbg = f.debug_struct("Connection");
+        dbg.field("session_id", &self.session_id)
+            .field("capabilities", &self.capabilities)
+            .field("parse_replies", &self.parse_replies)
+            .field("warnings_as_errors", &self.warnings_as_errors)
+            .field("is_closed", &self.is_closed)
+            .field("desynchronized", &self.desynchronized);
+        #[cfg(feature = "tokio")]
+        dbg.field("timeout", &self.timeout);
+        dbg.finish_non_exhaustive()
+    }
 }
 
 impl Connection {
@@ -348,10 +364,6 @@ impl Connection {
         start_time: Option<&str>,
         stop_time: Option<&str>,
     ) -> NetconfClientResult<()> {
-        let start_time = start_time
-            .map(crate::message::parse_date_time)
-            .transpose()?;
-        let stop_time = stop_time.map(crate::message::parse_date_time).transpose()?;
         let notification = Rpc::new_with_operation(RpcOperation::new_create_subscription(
             stream, filter, start_time, stop_time,
         )?);

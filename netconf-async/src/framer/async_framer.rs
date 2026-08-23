@@ -1,6 +1,7 @@
 use crate::error::{NetconfClientError, NetconfClientResult};
 use crate::framer::{Framer, NETCONF_1_0_TERMINATOR};
 use async_trait::async_trait;
+use core::fmt;
 use log::debug;
 use memchr::memmem;
 use std::io;
@@ -21,6 +22,16 @@ pub struct AsyncFramer<T> {
     max_message_size: usize,
 
     channel: T,
+}
+
+impl<T> fmt::Debug for AsyncFramer<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AsyncFramer")
+            .field("upgraded", &self.upgraded)
+            .field("max_message_size", &self.max_message_size)
+            .field("buffered", &self.read_buffer.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> AsyncFramer<T> {
@@ -199,6 +210,14 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use std::io::Cursor;
+
+    #[test]
+    fn debug_omits_channel() {
+        let framer = AsyncFramer::new(Cursor::new(Vec::<u8>::new()));
+        let dbg = format!("{framer:?}");
+        assert!(dbg.contains("upgraded: false"), "{dbg}");
+        assert!(dbg.contains("buffered: 0"), "{dbg}");
+    }
 
     #[tokio::test]
     async fn test_chunked_framer() {

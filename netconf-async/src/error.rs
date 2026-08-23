@@ -19,8 +19,8 @@ pub enum NetconfClientError {
     #[error("{0}")]
     Ssh(String),
     /// XML serialize or deserialize failure.
-    #[error(transparent)]
-    SerializingFailure(#[from] quick_xml::DeError),
+    #[error("{0}")]
+    SerializingFailure(String),
     /// Device returned one or more `<rpc-error>` elements.
     #[error("remote procedure call failed:\n{0}")]
     Netconf(#[from] message::RpcReply),
@@ -101,6 +101,18 @@ pub enum NetconfClientError {
     /// Anything that does not fit the other variants.
     #[error("{0}")]
     Other(String),
+}
+
+impl From<quick_xml::DeError> for NetconfClientError {
+    fn from(err: quick_xml::DeError) -> Self {
+        Self::SerializingFailure(err.to_string())
+    }
+}
+
+impl From<quick_xml::SeError> for NetconfClientError {
+    fn from(err: quick_xml::SeError) -> Self {
+        Self::SerializingFailure(err.to_string())
+    }
 }
 
 impl NetconfClientError {

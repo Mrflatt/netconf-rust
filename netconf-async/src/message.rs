@@ -326,14 +326,16 @@ impl RpcOperation {
 
     /// `<create-subscription>` ([RFC5277 2.1.1](https://www.rfc-editor.org/rfc/rfc5277.html#section-2.1.1)).
     ///
-    /// `stop_time` requires `start_time`. `stop_time` earlier than `start_time`
-    /// is rejected.
+    /// `start_time` / `stop_time` are RFC 3339. `stop_time` requires
+    /// `start_time`. `stop_time` earlier than `start_time` is rejected.
     pub fn new_create_subscription(
         stream: Option<&str>,
         filter: Option<Filter>,
-        start_time: Option<OffsetDateTime>,
-        stop_time: Option<OffsetDateTime>,
+        start_time: Option<&str>,
+        stop_time: Option<&str>,
     ) -> error::NetconfClientResult<RpcOperation> {
+        let start_time = start_time.map(parse_date_time).transpose()?;
+        let stop_time = stop_time.map(parse_date_time).transpose()?;
         if let Some(stop) = stop_time {
             let Some(start) = start_time else {
                 return Err(error::NetconfClientError::new(
@@ -1118,7 +1120,7 @@ pub struct ErrorInfo {
 }
 
 /// Parse an RFC 3339 timestamp for `<create-subscription>` replay.
-pub fn parse_date_time(value: &str) -> error::NetconfClientResult<OffsetDateTime> {
+pub(crate) fn parse_date_time(value: &str) -> error::NetconfClientResult<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).map_err(|err| {
         error::NetconfClientError::new(format!("invalid date-time '{value}': {err}"))
     })
@@ -1613,13 +1615,11 @@ mod tests {
   </create-subscription>
 </rpc>
 "#;
-        let start_time = parse_date_time("2026-01-01T00:00:00Z").unwrap();
-        let stop_time = parse_date_time("2026-01-01T00:01:00Z").unwrap();
         let subscription = rpc(RpcOperation::new_create_subscription(
             Some("NETCONF"),
             None,
-            Some(start_time),
-            Some(stop_time),
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:01:00Z"),
         )
         .unwrap());
         assert_eq!(subscription.to_string(), expected.trim());
@@ -1634,16 +1634,21 @@ mod tests {
   </create-subscription>
 </rpc>
 "#;
-        let start_time = parse_date_time("2026-01-01T00:00:00Z").unwrap();
-        let subscription =
-            rpc(RpcOperation::new_create_subscription(None, None, Some(start_time), None).unwrap());
+        let subscription = rpc(RpcOperation::new_create_subscription(
+            None,
+            None,
+            Some("2026-01-01T00:00:00Z"),
+            None,
+        )
+        .unwrap());
         assert_eq!(subscription.to_string(), expected.trim());
     }
 
     #[test]
     fn create_subscription_stop_requires_start() {
-        let stop = parse_date_time("2026-01-01T00:01:00Z").unwrap();
-        let err = RpcOperation::new_create_subscription(None, None, None, Some(stop)).unwrap_err();
+        let err =
+            RpcOperation::new_create_subscription(None, None, None, Some("2026-01-01T00:01:00Z"))
+                .unwrap_err();
         assert!(
             err.to_string().contains("stopTime requires startTime"),
             "{err}"
@@ -1652,10 +1657,13 @@ mod tests {
 
     #[test]
     fn create_subscription_stop_before_start_is_error() {
-        let start = parse_date_time("2026-01-01T00:01:00Z").unwrap();
-        let stop = parse_date_time("2026-01-01T00:00:00Z").unwrap();
-        let err =
-            RpcOperation::new_create_subscription(None, None, Some(start), Some(stop)).unwrap_err();
+        let err = RpcOperation::new_create_subscription(
+            None,
+            None,
+            Some("2026-01-01T00:01:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("earlier than startTime"), "{err}");
     }
 
@@ -1663,6 +1671,22 @@ mod tests {
     fn parse_date_time_rejects_garbage() {
         let err = parse_date_time("yesterday").unwrap_err();
         assert!(err.to_string().contains("invalid date-time"), "{err}");
+    }
+
+    #[test]
+    fn create_subscription_rejects_garbage_start() {
+        let err =
+            RpcOperation::new_create_subscription(None, None, Some("yesterday"), None).unwrap_err();
+        assert!(err.to_string().contains("invalid date-time"), "{err}");
+    }
+
+    #[test]
+    fn from_xml_garbage_is_serializing_failure() {
+        let err = from_xml::<RpcReply>("<<<").unwrap_err();
+        assert!(
+            matches!(err, error::NetconfClientError::SerializingFailure(_)),
+            "{err:?}"
+        );
     }
 
     #[test]

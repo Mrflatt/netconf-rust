@@ -1,11 +1,9 @@
 //! Session-level tests driven by a scripted in-memory device.
 
-use netconf_async::connection::Connection;
-use netconf_async::error::NetconfClientError;
 use netconf_async::framer::Framer;
 use netconf_async::framer::async_framer::AsyncFramer;
-use netconf_async::message::{Datastore, ErrorTag, Filter};
-use netconf_async::transport::Transport;
+use netconf_async::message::ErrorTag;
+use netconf_async::{Connection, Datastore, Filter, NetconfClientError, Transport};
 use std::sync::{Arc, Mutex};
 use tokio::io::DuplexStream;
 
@@ -169,6 +167,8 @@ async fn hello_exchange_reports_session_and_capabilities() {
     let mut conn = Connection::new(device.transport).await.unwrap();
 
     assert_eq!(conn.session_id(), Some(7));
+    let dbg = format!("{conn:?}");
+    assert!(dbg.contains("session_id: Some(7)"), "{dbg}");
     assert!(conn.has_capability("urn:ietf:params:netconf:base:1.1"));
     // Query parameters must not defeat the lookup.
     assert!(conn.has_capability("urn:ietf:params:netconf:capability:url:1.0"));

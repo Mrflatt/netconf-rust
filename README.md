@@ -63,13 +63,11 @@ netconf-cli update --check  # report only
 ## Library
 
 ```rust
-use netconf_async::connection::Connection;
-use netconf_async::message::{Datastore, Filter};
-use netconf_async::transport::ssh::{HostKeyPolicy, SshAuth, SshConfig, SSHTransport};
+use netconf_async::{Connection, Datastore, Filter, HostKeyPolicy, SshAuth, SshConfig, SshTransport};
 
 #[tokio::main]
-async fn main() -> netconf_async::error::NetconfClientResult<()> {
-    let transport = SSHTransport::connect(
+async fn main() -> netconf_async::NetconfClientResult<()> {
+    let transport = SshTransport::connect(
         SshConfig::new("192.0.2.10", 830, "netconf", SshAuth::password("secret"))
             .host_key(HostKeyPolicy::Fingerprint("SHA256:base64fingerprint".into())),
     ).await?;
@@ -97,7 +95,7 @@ Other methods on `Connection`: `edit_config`, `copy_config`, `delete_config`, `l
 
 | Feature | Default | Purpose |
 |---|---|---|
-| `ssh` | yes | `SSHTransport` over `russh` (implies `tokio`) |
+| `ssh` | yes | `SshTransport` over `russh` (implies `tokio`) |
 | `tokio` | yes | Tokio framer, RPC timeouts, notification streams |
 
 ## CLI

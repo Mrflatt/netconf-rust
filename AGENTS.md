@@ -106,7 +106,7 @@ Implemented CLI subcommands: `get`, `get-config`, `edit`, `copy`, `commit`, `rpc
 - Rust **edition 2024**, workspace resolver **3**. `rust-version = "1.85"` on `netconf-async`; CI uses current stable.
 - Tokio 1 (multi-thread). Traits use `async-trait`.
 - XML via `quick-xml` + `serde` (derive feature). Substring search via `memchr`.
-- SSH: `russh` (tokio) inside the library only. CLI parses `~/.ssh/config` with `ssh2-config` and calls `SSHTransport::connect`.
+- SSH: `russh` (tokio) inside the library only. CLI parses `~/.ssh/config` with `ssh2-config` and calls `SshTransport::connect`.
 - Errors: `thiserror` → `NetconfClientError`, alias `NetconfClientResult<T>`.
 - CLI: clap 4 builder API (not derive on command structs), `env_logger`, `color-print`.
 
@@ -121,7 +121,7 @@ Library features (`netconf-async`):
 unconditionally, so it must not be optional. Every feature combination has to
 build — check with `cargo check --no-default-features --features ...`.
 
-Crate-level rustdoc lives in `netconf-async/src/lib.rs`; crates.io renders `netconf-async/README.md`. Do not hardcode a crate version that does not match `Cargo.toml`.
+Crate-level rustdoc is `netconf-async/README.md` (`#![doc = include_str!(...)]` in `lib.rs`). crates.io renders the same file. Do not hardcode a crate version that does not match `Cargo.toml`.
 
 ## Protocol notes
 
@@ -133,7 +133,7 @@ Session flow:
 4. Each RPC is `write_and_receive`. Reply is parsed as `RpcReply`; `message-id` must match (mismatch desynchronizes). Error-severity `<rpc-error>` becomes `NetconfClientError::Netconf`. Warning-only is success unless `set_warnings_as_errors(true)`. EOF after `<commit>` / `<commit-configuration>` is `CommitUnknown` — thread `is_commit` through the send, never a session flag.
 5. `close_session` sends the RPC and then closes the transport. `Drop` cannot await I/O, so it only warns when the session is still open.
 
-`SSHTransport::connect(SshConfig)` owns TCP, auth (`SshAuth::{Password,Agent,KeyFile}`), ProxyJump chain (`SshConfig::jump` appends hops), host-key policy (`RejectAll` default, `Fingerprint`, `KnownHosts`, `AcceptAll` lab opt-in), and session knobs (`SshSessionOpts`: compression, keepalive, kex/cipher/mac prefs). Each hop is a russh `direct-tcpip` channel used as the next handshake stream. Do not leak `russh` types (`NetconfClientError::Ssh` is a `String`). CLI maps `IdentityFile`. Host keys default to `accept-new` (pin unknown, reject changed). `--strict-host-key-checking` / `StrictHostKeyChecking`: `yes`, `accept-new`, `no`.
+`SshTransport::connect(SshConfig)` owns TCP, auth (`SshAuth::{Password,Agent,KeyFile}`), ProxyJump chain (`SshConfig::jump` appends hops), host-key policy (`RejectAll` default, `Fingerprint`, `KnownHosts`, `AcceptAll` lab opt-in), and session knobs (`SshSessionOpts`: compression, keepalive, kex/cipher/mac prefs). Each hop is a russh `direct-tcpip` channel used as the next handshake stream. Do not leak `russh` types (`NetconfClientError::Ssh` is a `String`). CLI maps `IdentityFile`. Host keys default to `accept-new` (pin unknown, reject changed). `--strict-host-key-checking` / `StrictHostKeyChecking`: `yes`, `accept-new`, `no`.
 
 `Connection::set_parse_replies(false)` skips the reply parse and returns raw XML.
 `Connection::set_timeout` bounds one RPC; on timeout the session is marked
