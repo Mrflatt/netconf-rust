@@ -24,7 +24,7 @@ Talk to routers and switches over SSH using the `netconf` subsystem. The library
 | Crate | What |
 |---|---|
 | [`netconf-async`](netconf-async) | Library: `Connection`, messages, framer, SSH transport |
-| [`netconf-cli`](netconf-cli) | CLI binary `netconf-cli` (help text says `netconf`) |
+| [`netconf-cli`](netconf-cli) | CLI binary `netconf-cli` |
 
 Rust edition **2024** (rustc 1.85+). Workspace resolver 3.
 

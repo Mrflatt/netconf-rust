@@ -142,8 +142,8 @@ pub fn cli() -> Command {
         .long_version(crate_version!())
         .arg_required_else_help(true)
         .allow_external_subcommands(false)
-        .bin_name("netconf")
-        .display_name("netconf")
+        .bin_name("netconf-cli")
+        .display_name("netconf-cli")
         .help_template(color_print::cstr!(
             "\
 {about-with-newline}
@@ -164,7 +164,7 @@ pub fn cli() -> Command {
     <cyan,bold>notification</>      Start netconf notification listener
     <cyan,bold>update</>            Update netconf-cli from GitHub releases
 
-See '<cyan,bold>netconf help</> <cyan><<command>></>' for more information on a specific command.\n",
+See '<cyan,bold>netconf-cli help</> <cyan><<command>></>' for more information on a specific command.\n",
         ))
         .args([
             arg!(-v --verbose ... "Use verbose output (-v debug, -vv wire/trace, -vvv russh debug, -vvvv russh trace)")
@@ -287,6 +287,14 @@ fn shared_jump_pool(
 #[test]
 fn verify_cli() {
     cli().debug_assert();
+}
+
+#[test]
+fn help_uses_binary_name() {
+    let usage = cli().render_usage().to_string();
+    assert!(usage.contains("netconf-cli"), "{usage}");
+    let help = cli().render_help().to_string();
+    assert!(help.contains("netconf-cli help"), "{help}");
 }
 
 #[test]
