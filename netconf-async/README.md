@@ -52,7 +52,7 @@ the server advertises [`NETCONF_BASE_11_CAP`]. Call [`Connection::close_session`
 when you are done: a clean shutdown has to await I/O, which [`Drop`] cannot do, so
 dropping an open session only logs a warning.
 
-[`SshTransport::connect`] takes [`SshAuth`] (password, agent, or key file) and an
+[`SshTransport::connect`] takes [`SshAuth`] (password, agent, key file, or identity files) and an
 optional ProxyJump chain. [`SshAuth::password`] tries SSH `password`, then
 `keyboard-interactive` with the same secret if the server still offers it.
 Host-key policy

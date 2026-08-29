@@ -31,7 +31,7 @@ const MAX_KEYBOARD_INTERACTIVE_ROUNDS: usize = 5;
 /// How to authenticate the SSH user.
 ///
 /// Passwords and key passphrases are overwritten on drop. Prefer
-/// [`SshAuth::password`] / [`SshAuth::key_file`].
+/// [`SshAuth::password`] / [`SshAuth::key_file`] / [`SshAuth::identity_files`].
 #[derive(Clone, PartialEq, Eq)]
 pub enum SshAuth {
     /// Password authentication.
@@ -50,6 +50,17 @@ pub enum SshAuth {
         /// Passphrase for an encrypted key, if any.
         passphrase: Option<Zeroizing<String>>,
     },
+    /// `IdentityFile` list with OpenSSH [`IdentitiesOnly`](https://man.openbsd.org/ssh_config#IdentitiesOnly) semantics.
+    ///
+    /// Each file is tried in order: ssh-agent if that public key is loaded,
+    /// otherwise the private key on disk. When `identities_only` is `false`,
+    /// remaining agent identities are tried after the files.
+    IdentityFiles {
+        /// Private key paths (`IdentityFile`), in order.
+        files: Vec<PathBuf>,
+        /// When `true`, do not try agent identities that are not among `files`.
+        identities_only: bool,
+    },
 }
 
 impl SshAuth {
@@ -67,6 +78,17 @@ impl SshAuth {
             passphrase: passphrase.map(Zeroizing::new),
         }
     }
+
+    /// `IdentityFile` list. `identities_only` is OpenSSH `IdentitiesOnly`.
+    pub fn identity_files(
+        files: impl IntoIterator<Item = impl Into<PathBuf>>,
+        identities_only: bool,
+    ) -> Self {
+        Self::IdentityFiles {
+            files: files.into_iter().map(Into::into).collect(),
+            identities_only,
+        }
+    }
 }
 
 impl fmt::Debug for SshAuth {
@@ -78,6 +100,14 @@ impl fmt::Debug for SshAuth {
                 .debug_struct("KeyFile")
                 .field("path", path)
                 .field("passphrase", &passphrase.as_ref().map(|_| ".."))
+                .finish(),
+            Self::IdentityFiles {
+                files,
+                identities_only,
+            } => f
+                .debug_struct("IdentityFiles")
+                .field("files", files)
+                .field("identities_only", identities_only)
                 .finish(),
         }
     }
@@ -1058,6 +1088,10 @@ async fn authenticate(
             )
             .await?
         }
+        SshAuth::IdentityFiles {
+            files,
+            identities_only,
+        } => authenticate_identity_files(session, username, files, *identities_only).await?,
     };
     if success {
         Ok(())
@@ -1156,6 +1190,8 @@ async fn authenticate_key_file(
         .success())
 }
 
+type DynAgent = AgentClient<Box<dyn keys::agent::client::AgentStream + Send + Unpin>>;
+
 async fn authenticate_agent(
     session: &mut Handle<ClientHandler>,
     username: &str,
@@ -1171,35 +1207,145 @@ async fn authenticate_agent(
         .map_err(map_russh)?
         .flatten();
     for identity in identities {
-        let result = match identity {
-            AgentIdentity::PublicKey { key, comment } => {
-                trace!("trying ssh-agent identity {comment}");
-                session
-                    .authenticate_publickey_with(username, key, hash, &mut agent)
-                    .await
-            }
-            AgentIdentity::Certificate {
-                certificate,
-                comment,
-            } => {
-                trace!("trying ssh-agent certificate {comment}");
-                session
-                    .authenticate_certificate_with(username, certificate, hash, &mut agent)
-                    .await
-            }
-        };
-        match result {
-            Ok(auth) if auth.success() => return Ok(true),
-            Ok(_) => continue,
-            Err(err) => {
-                trace!("ssh-agent identity rejected: {err}");
-            }
+        if try_agent_identity(session, username, identity, hash, &mut agent).await {
+            return Ok(true);
         }
     }
     Ok(false)
 }
 
-type DynAgent = AgentClient<Box<dyn keys::agent::client::AgentStream + Send + Unpin>>;
+async fn authenticate_identity_files(
+    session: &mut Handle<ClientHandler>,
+    username: &str,
+    files: &[PathBuf],
+    identities_only: bool,
+) -> NetconfClientResult<bool> {
+    let hash = session
+        .best_supported_rsa_hash()
+        .await
+        .map_err(map_russh)?
+        .flatten();
+    let mut agent = match connect_agent().await {
+        Ok(agent) => Some(agent),
+        Err(err) => {
+            trace!("ssh-agent unavailable: {err}");
+            None
+        }
+    };
+    let mut agent_identities = match agent.as_mut() {
+        Some(agent) => agent.request_identities().await.map_err(map_keys)?,
+        None => Vec::new(),
+    };
+
+    for path in files {
+        let mut tried_from_agent = false;
+        if let Some(pubkey) = public_key_for_identity_file(path)
+            && let Some(identity) = take_matching_identity(&mut agent_identities, &pubkey)
+        {
+            tried_from_agent = true;
+            if let Some(agent) = agent.as_mut()
+                && try_agent_identity(session, username, identity, hash, agent).await
+            {
+                return Ok(true);
+            }
+        }
+        if !tried_from_agent && try_identity_file(session, username, path, hash).await? {
+            return Ok(true);
+        }
+    }
+
+    if identities_only {
+        return Ok(false);
+    }
+    let Some(agent) = agent.as_mut() else {
+        return Ok(false);
+    };
+    for identity in agent_identities {
+        if try_agent_identity(session, username, identity, hash, agent).await {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn try_identity_file(
+    session: &mut Handle<ClientHandler>,
+    username: &str,
+    path: &Path,
+    hash: Option<HashAlg>,
+) -> NetconfClientResult<bool> {
+    let key = match keys::load_secret_key(path, None) {
+        Ok(key) => key,
+        Err(err) => {
+            trace!("could not load IdentityFile {}: {err}", path.display());
+            return Ok(false);
+        }
+    };
+    Ok(session
+        .authenticate_publickey(username, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
+        .await
+        .map_err(map_russh)?
+        .success())
+}
+
+async fn try_agent_identity(
+    session: &mut Handle<ClientHandler>,
+    username: &str,
+    identity: AgentIdentity,
+    hash: Option<HashAlg>,
+    agent: &mut DynAgent,
+) -> bool {
+    let result = match identity {
+        AgentIdentity::PublicKey { key, comment } => {
+            trace!("trying ssh-agent identity {comment}");
+            session
+                .authenticate_publickey_with(username, key, hash, agent)
+                .await
+        }
+        AgentIdentity::Certificate {
+            certificate,
+            comment,
+        } => {
+            trace!("trying ssh-agent certificate {comment}");
+            session
+                .authenticate_certificate_with(username, certificate, hash, agent)
+                .await
+        }
+    };
+    match result {
+        Ok(auth) if auth.success() => true,
+        Ok(_) => false,
+        Err(err) => {
+            trace!("ssh-agent identity rejected: {err}");
+            false
+        }
+    }
+}
+
+fn take_matching_identity(
+    identities: &mut Vec<AgentIdentity>,
+    wanted: &PublicKey,
+) -> Option<AgentIdentity> {
+    identities
+        .iter()
+        .position(|identity| identity.public_key().key_data() == wanted.key_data())
+        .map(|idx| identities.remove(idx))
+}
+
+fn public_key_for_identity_file(path: &Path) -> Option<PublicKey> {
+    let mut pub_name = path.file_name().unwrap_or_default().to_os_string();
+    pub_name.push(".pub");
+    let pub_path = path.with_file_name(pub_name);
+    if let Ok(key) = keys::load_public_key(&pub_path) {
+        return Some(key);
+    }
+    if let Ok(key) = keys::load_public_key(path) {
+        return Some(key);
+    }
+    keys::load_secret_key(path, None)
+        .ok()
+        .map(|key| key.public_key().clone())
+}
 
 async fn connect_agent() -> NetconfClientResult<DynAgent> {
     #[cfg(unix)]
@@ -1462,6 +1608,25 @@ mod tests {
         let key = format!("{:?}", SshAuth::key_file("/tmp/id", Some("s3cret".into())));
         assert!(!key.contains("s3cret"), "{key}");
         assert!(key.contains("/tmp/id"), "{key}");
+        let files = format!("{:?}", SshAuth::identity_files(["/tmp/id_ed25519"], true));
+        assert!(files.contains("id_ed25519"), "{files}");
+        assert!(files.contains("identities_only: true"), "{files}");
+    }
+
+    #[test]
+    fn public_key_for_identity_file_reads_pub_sidecar() {
+        let dir = std::env::temp_dir().join(format!("netconf-id-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("id_ed25519");
+        std::fs::write(
+            dir.join("id_ed25519.pub"),
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XFSqti user@example.com\n",
+        )
+        .unwrap();
+        let key = public_key_for_identity_file(&path).expect("load .pub sidecar");
+        assert_eq!(key.algorithm(), russh::keys::Algorithm::Ed25519);
+        assert!(public_key_for_identity_file(Path::new("/no/such/identity-file")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::commands::builtin::{builtin, builtin_exec, dry_run_data};
-use crate::config::{CliConfig, DryRun, Host};
+use crate::config::{CliConfig, DryRun, Host, query_host_params};
 use clap::{
     Arg, ArgAction, Command, arg, crate_authors, crate_description, crate_name, crate_version,
 };
@@ -10,7 +10,6 @@ use netconf_async::NETCONF_BASE_11_CAP;
 use netconf_async::connection::Connection;
 use netconf_async::error::{NetconfClientError, NetconfClientResult};
 use netconf_async::transport::ssh::{JumpPool, SshJump, SshTransport};
-use ssh2_config::{DefaultAlgorithms, HostParams};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
@@ -24,11 +23,7 @@ pub async fn exec(cmd: String, cfg: CliConfig) -> NetconfClientResult<bool> {
     let sem = Arc::new(tokio::sync::Semaphore::new(cfg.inner.parallel));
     let mut prepared = Vec::new();
     for target in hosts {
-        let params = if let Some(ssh_config) = &cfg.inner.ssh_config {
-            ssh_config.query(&target.address)
-        } else {
-            HostParams::new(&DefaultAlgorithms::default())
-        };
+        let params = query_host_params(cfg.inner.ssh_config.as_ref(), &target.address)?;
         let host = Host::new(
             &target.address,
             &cfg.inner.username,

@@ -194,6 +194,18 @@ struct JumpSpec {
     port: Option<u16>,
 }
 
+/// ssh_config `Host` patterns match the hostname, not `host:port`.
+pub(crate) fn query_host_params(
+    ssh_config: Option<&SshConfig>,
+    addr: &str,
+) -> NetconfClientResult<HostParams> {
+    let (host, _) = split_host_port(addr)?;
+    Ok(match ssh_config {
+        Some(cfg) => cfg.query(&host),
+        None => HostParams::new(&DefaultAlgorithms::default()),
+    })
+}
+
 fn split_host_port(addr: &str) -> NetconfClientResult<(String, Option<u16>)> {
     if let Some(rest) = addr.strip_prefix('[') {
         let Some((host, after)) = rest.split_once(']') else {
@@ -312,14 +324,11 @@ impl Host {
     /// Library SSH config. Host keys default to [`HostKeyPolicy::AcceptNew`].
     /// Jump auth is IdentityFile or agent — the device password is not reused.
     pub(crate) fn ssh_transport_config(&self) -> NetconfClientResult<TransportSshConfig> {
-        let mut config = TransportSshConfig::new(
-            &self.address,
-            self.port,
-            &self.auth_user,
-            ssh_auth(&self.auth_password, &self.params),
-        )
-        .host_key(host_key_policy(&self.params, self.strict_host_key))
-        .session(session_opts(&self.params));
+        let auth = ssh_auth(&self.auth_password, &self.params);
+        debug!(target: &self.address, "SSH auth {auth:?}");
+        let mut config = TransportSshConfig::new(&self.address, self.port, &self.auth_user, auth)
+            .host_key(host_key_policy(&self.params, self.strict_host_key))
+            .session(session_opts(&self.params));
         if let Some(jumps) = self.params.proxy_jump.as_deref() {
             for spec in jumps {
                 let jump = self.resolve_jump(spec)?;
@@ -366,21 +375,49 @@ impl Host {
 }
 
 fn ssh_auth(password: &Option<String>, params: &HostParams) -> SshAuth {
+    let files: Vec<PathBuf> = params
+        .identity_file
+        .as_ref()
+        .map(|files| files.iter().map(|path| expand_tilde(path)).collect())
+        .unwrap_or_default();
+    // IdentitiesOnly yes: only those keys. Skip --password / NETCONF_PASSWORD so a
+    // global secret does not override a host-specific IdentityFile.
+    if ssh_config_identities_only(params) {
+        let files = if files.is_empty() {
+            default_identity_files()
+        } else {
+            files
+        };
+        return SshAuth::identity_files(files, true);
+    }
     if let Some(password) = password {
         return SshAuth::password(password.clone());
     }
-    if let Some(files) = params.identity_file.as_ref()
-        && let Some(path) = files.first()
-    {
-        if files.len() > 1 {
-            debug!(
-                "using first IdentityFile {}; extra files are ignored",
-                path.display()
-            );
-        }
-        return SshAuth::key_file(expand_tilde(path), None);
+    if !files.is_empty() {
+        return SshAuth::identity_files(files, false);
     }
     SshAuth::Agent
+}
+
+fn ssh_config_identities_only(params: &HostParams) -> bool {
+    params
+        .unsupported_fields
+        .get("identitiesonly")
+        .and_then(|values| values.first())
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "yes" | "true" | "1"))
+}
+
+fn default_identity_files() -> Vec<PathBuf> {
+    const NAMES: &[&str] = &[
+        "id_rsa",
+        "id_ecdsa",
+        "id_ecdsa_sk",
+        "id_ed25519",
+        "id_ed25519_sk",
+    ];
+    let mut dir = home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    dir.push(".ssh");
+    NAMES.iter().map(|name| dir.join(name)).collect()
 }
 
 /// How the CLI should treat SSH host keys.
@@ -797,11 +834,15 @@ mod tests {
 
         let cfg = device.ssh_transport_config().unwrap();
         match cfg.auth() {
-            SshAuth::KeyFile { path, passphrase } => {
-                assert!(path.ends_with(".ssh/id_ed25519"), "{path:?}");
-                assert!(passphrase.is_none());
+            SshAuth::IdentityFiles {
+                files,
+                identities_only,
+            } => {
+                assert_eq!(files.len(), 1);
+                assert!(files[0].ends_with(".ssh/id_ed25519"), "{files:?}");
+                assert!(!*identities_only);
             }
-            other => panic!("expected KeyFile, got {other:?}"),
+            other => panic!("expected IdentityFiles, got {other:?}"),
         }
         assert_eq!(cfg.session_opts().compression_enabled(), Some(true));
         assert_eq!(
@@ -831,6 +872,213 @@ mod tests {
             device.ssh_transport_config().unwrap().auth(),
             SshAuth::Password(_)
         ));
+    }
+
+    #[test]
+    fn identities_only_ignores_password() {
+        let config = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new(
+                    "Host *\n\
+                     IdentityFile ~/.ssh/id_ed25519\n\
+                     IdentitiesOnly yes\n",
+                ),
+                ParseRule::ALLOW_UNSUPPORTED_FIELDS,
+            )
+            .unwrap();
+        let params = config.query("192.0.2.10");
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("netconf-user".into()),
+            &Some("device-secret".into()),
+            params,
+            830,
+            Some(config),
+        )
+        .unwrap();
+        match device.ssh_transport_config().unwrap().auth() {
+            SshAuth::IdentityFiles {
+                files,
+                identities_only,
+            } => {
+                assert!(*identities_only);
+                assert_eq!(files.len(), 1);
+                assert!(files[0].ends_with(".ssh/id_ed25519"), "{files:?}");
+            }
+            other => panic!("expected IdentityFiles, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssh_config_query_strips_port_from_host() {
+        let config = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new(
+                    "Host router.example\n\
+                     IdentityFile ~/.ssh/id_ed25519\n\
+                     IdentitiesOnly yes\n",
+                ),
+                ParseRule::ALLOW_UNSUPPORTED_FIELDS,
+            )
+            .unwrap();
+        let params = query_host_params(Some(&config), "router.example:2222").unwrap();
+        let device = Host::new(
+            "router.example:2222",
+            &Some("netconf-user".into()),
+            &Some("device-secret".into()),
+            params,
+            830,
+            Some(config),
+        )
+        .unwrap();
+        assert_eq!(device.port, 2222);
+        match device.ssh_transport_config().unwrap().auth() {
+            SshAuth::IdentityFiles {
+                files,
+                identities_only,
+            } => {
+                assert!(*identities_only);
+                assert!(
+                    files.iter().any(|path| path.ends_with("id_ed25519")),
+                    "{files:?}"
+                );
+            }
+            other => panic!("expected IdentityFiles, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn identities_only_keeps_all_identity_files() {
+        let config = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new(
+                    "Host *\n\
+                     IdentityFile ~/.ssh/id_ed25519\n\
+                     IdentityFile ~/.ssh/id_rsa\n\
+                     IdentitiesOnly yes\n",
+                ),
+                ParseRule::ALLOW_UNSUPPORTED_FIELDS,
+            )
+            .unwrap();
+        let params = config.query("192.0.2.10");
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("netconf-user".into()),
+            &None,
+            params,
+            830,
+            Some(config),
+        )
+        .unwrap();
+        match device.ssh_transport_config().unwrap().auth() {
+            SshAuth::IdentityFiles {
+                files,
+                identities_only,
+            } => {
+                assert!(*identities_only);
+                assert_eq!(files.len(), 2);
+                assert!(files[0].ends_with(".ssh/id_ed25519"), "{files:?}");
+                assert!(files[1].ends_with(".ssh/id_rsa"), "{files:?}");
+            }
+            other => panic!("expected IdentityFiles, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn identities_only_without_identity_file_uses_default_files() {
+        let config = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new("Host *\n  IdentitiesOnly yes\n"),
+                ParseRule::ALLOW_UNSUPPORTED_FIELDS,
+            )
+            .unwrap();
+        let params = config.query("192.0.2.10");
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("u".into()),
+            &None,
+            params,
+            830,
+            Some(config),
+        )
+        .unwrap();
+        match device.ssh_transport_config().unwrap().auth() {
+            SshAuth::IdentityFiles {
+                files,
+                identities_only,
+            } => {
+                assert!(*identities_only);
+                let names: Vec<_> = files.iter().filter_map(|path| path.file_name()).collect();
+                assert!(names.iter().any(|name| *name == "id_ed25519"), "{names:?}");
+                assert!(names.iter().any(|name| *name == "id_rsa"), "{names:?}");
+            }
+            other => panic!("expected IdentityFiles, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn identities_only_no_still_uses_identity_files() {
+        let config = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new("Host *\n  IdentityFile /tmp/id\n  IdentitiesOnly no\n"),
+                ParseRule::ALLOW_UNSUPPORTED_FIELDS,
+            )
+            .unwrap();
+        let params = config.query("192.0.2.10");
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("u".into()),
+            &None,
+            params,
+            830,
+            Some(config),
+        )
+        .unwrap();
+        match device.ssh_transport_config().unwrap().auth() {
+            SshAuth::IdentityFiles {
+                files,
+                identities_only,
+            } => {
+                assert!(!*identities_only);
+                assert_eq!(files.as_slice(), [PathBuf::from("/tmp/id")]);
+            }
+            other => panic!("expected IdentityFiles, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jump_inherits_identities_only_from_host_star() {
+        let config = SshConfig::default()
+            .parse(
+                &mut std::io::Cursor::new(
+                    "Host *\n  IdentitiesOnly yes\n  IdentityFile ~/.ssh/id_ed25519\n\
+                     Host jump\n  User jump-user\n  Port 22\n",
+                ),
+                ParseRule::ALLOW_UNSUPPORTED_FIELDS,
+            )
+            .unwrap();
+        let mut device_params = config.query("192.0.2.10");
+        device_params.proxy_jump = Some(vec!["jump".into()]);
+        let device = Host::new(
+            "192.0.2.10",
+            &Some("netconf-user".into()),
+            &Some("device-secret".into()),
+            device_params,
+            830,
+            Some(config),
+        )
+        .unwrap();
+        let cfg = device.ssh_transport_config().unwrap();
+        match cfg.jumps()[0].auth() {
+            SshAuth::IdentityFiles {
+                files,
+                identities_only,
+            } => {
+                assert!(*identities_only);
+                assert!(files.iter().any(|path| path.ends_with("id_ed25519")));
+            }
+            other => panic!("expected IdentityFiles, got {other:?}"),
+        }
     }
 
     #[test]
