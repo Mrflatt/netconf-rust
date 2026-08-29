@@ -150,6 +150,8 @@ Default NETCONF-over-SSH port is **830**. Jump hosts use **22**.
 
 Repo has immutable GitHub releases: a published release cannot gain or change assets. release-please therefore creates `netconf-cli-v*` as a **draft** (`draft` + `force-tag-creation` so the tag exists immediately). CI builds archives, uploads them to the draft, then publishes. After that the release is frozen. `netconf-async` has no binaries and is published immediately.
 
+One release PR for the workspace. `separate-pull-requests` plus `cargo-workspace` leaves each crate PR with mismatched path+version deps and a half-updated lockfile, so Cargo cannot resolve the workspace. Draft CLI vs immediate async publish still split after merge (`cli_release` / `async_release`).
+
 `GITHUB_TOKEN` cannot trigger a second workflow, so binaries run in the same CI run. workflow_dispatch can finish a leftover draft; it cannot patch an already-published release.
 
 Assets: `netconf-cli-{version}-{target}.tar.gz`.
