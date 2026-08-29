@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0](https://github.com/Mrflatt/netconf-rust/compare/netconf-async-v0.1.0...netconf-async-v0.2.0) (2026-08-29)
+
+
+### Features
+
+* honor ssh_config IdentitiesOnly ([c956ae3](https://github.com/Mrflatt/netconf-rust/commit/c956ae3bde93341c6bbd711668c94d6fe5ec81d6))
+* keyboard-interactive SSH fallback and pretty XML by default ([f16e920](https://github.com/Mrflatt/netconf-rust/commit/f16e92002ff29d8321e8ffa8f980aa69a168c234))
+
 ## [0.1.0](https://github.com/Mrflatt/netconf-rust/releases/tag/netconf-async-v0.1.0) (2026-08-23)
 
 Initial release.
