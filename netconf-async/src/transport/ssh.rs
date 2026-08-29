@@ -303,6 +303,7 @@ impl SshJump {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SshConfig {
     host: String,
+    connect_host: Option<String>,
     port: u16,
     username: String,
     auth: SshAuth,
@@ -322,6 +323,7 @@ impl SshConfig {
     ) -> Self {
         SshConfig {
             host: host.into(),
+            connect_host: None,
             port,
             username: username.into(),
             auth,
@@ -349,9 +351,24 @@ impl SshConfig {
         self
     }
 
-    /// Device hostname or address.
+    /// Dial `host` but verify the host key as [`host`](Self::host).
+    ///
+    /// Use this when an allow-list resolved a hostname to a pinned IP. The
+    /// TCP / direct-tcpip destination becomes `host`; `known_hosts` still
+    /// looks up the name from [`SshConfig::new`].
+    pub fn connect_to(mut self, host: impl Into<String>) -> Self {
+        self.connect_host = Some(host.into());
+        self
+    }
+
+    /// Logical hostname used for host-key verification.
     pub fn host(&self) -> &str {
         &self.host
+    }
+
+    /// Address used for TCP / direct-tcpip. Defaults to [`host`](Self::host).
+    pub fn connect_host(&self) -> &str {
+        self.connect_host.as_deref().unwrap_or(&self.host)
     }
 
     /// Device NETCONF port.
@@ -455,7 +472,7 @@ impl JumpSession {
                     "jump session {self} is closed"
                 )));
             }
-            open_jump(&handle, &config.host, config.port).await?
+            open_jump(&handle, config.connect_host(), config.port).await?
         };
         let session = handshake_and_auth(stream, target_from_config(&config)).await?;
         let mut transport = open_netconf(session).await?;
@@ -554,7 +571,7 @@ impl SshTransport {
     /// use the same hops.
     pub async fn connect(config: SshConfig) -> NetconfClientResult<SshTransport> {
         if config.jumps.is_empty() {
-            let stream = connect_tcp(&config.host, config.port).await?;
+            let stream = connect_tcp(config.connect_host(), config.port).await?;
             let session = handshake_and_auth(stream, target_from_config(&config)).await?;
             return open_netconf(session).await;
         }
@@ -1423,11 +1440,20 @@ mod tests {
     fn ssh_config_defaults_to_reject_all_and_no_jump() {
         let cfg = SshConfig::new("192.0.2.10", 830, "netconf", SshAuth::password("x"));
         assert_eq!(cfg.host(), "192.0.2.10");
+        assert_eq!(cfg.connect_host(), "192.0.2.10");
         assert_eq!(cfg.port(), 830);
         assert_eq!(cfg.username(), "netconf");
         assert_eq!(cfg.host_key_policy(), &HostKeyPolicy::RejectAll);
         assert!(cfg.jumps().is_empty());
         assert!(matches!(cfg.auth(), SshAuth::Password(_)));
+    }
+
+    #[test]
+    fn ssh_config_connect_to_keeps_verify_host() {
+        let cfg = SshConfig::new("router.example", 830, "netconf", SshAuth::Agent)
+            .connect_to("192.0.2.10");
+        assert_eq!(cfg.host(), "router.example");
+        assert_eq!(cfg.connect_host(), "192.0.2.10");
     }
 
     #[test]

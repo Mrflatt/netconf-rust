@@ -149,6 +149,11 @@ netconf-cli get-config --host router.example --format json,pretty > running.json
 # self-update from GitHub Releases
 netconf-cli update
 netconf-cli update --check
+
+# MCP server (stdio default; HTTP is localhost only)
+netconf-cli mcp
+netconf-cli mcp --read-only
+netconf-cli mcp --http --port 8080
 ```
 
 From the workspace without installing, prefix the same arguments with `cargo run -p netconf-cli --`.

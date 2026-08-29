@@ -36,6 +36,9 @@
     "netconf-async": {
       "changelog-path": "CHANGELOG.md"
     },
+    "netconf-mcp": {
+      "changelog-path": "CHANGELOG.md"
+    },
     "netconf-cli": {
       "changelog-path": "CHANGELOG.md",
       "draft": true,

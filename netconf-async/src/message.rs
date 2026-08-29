@@ -314,6 +314,7 @@ impl RpcOperation {
             Self::CancelCommit(_) => "cancel-commit",
             Self::Commit(_) => "commit",
             Self::CreateSubscription(_) => "create-subscription",
+            Self::GetSchema(_) => "get-schema",
         }
     }
 
