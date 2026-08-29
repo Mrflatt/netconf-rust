@@ -142,8 +142,8 @@ netconf-cli get-config --host r1 --host r2 --output-dir ./configs
 netconf-cli edit --host @hosts.csv --file sap.xml --dry-run
 netconf-cli edit --host @hosts.csv --file sap.xml --dry-run --output-dir ./rendered
 
-# pretty XML or JSON
-netconf-cli get-config --host router.example --format pretty
+# pretty XML (default) or JSON
+netconf-cli get-config --host router.example
 netconf-cli get-config --host router.example --format json,pretty > running.json
 
 # self-update from GitHub Releases
@@ -155,7 +155,7 @@ From the workspace without installing, prefix the same arguments with `cargo run
 
 ### Auth and SSH config
 
-Resolution order for user: `--username` / `NETCONF_USERNAME`, then `User` from `~/.ssh/config`. Password is `--password` / `NETCONF_PASSWORD`. If no password is given, the first `IdentityFile` is used, otherwise the CLI walks identities from `ssh-agent`.
+Resolution order for user: `--username` / `NETCONF_USERNAME`, then `User` from `~/.ssh/config`. Password is `--password` / `NETCONF_PASSWORD`. SSH `password` is tried first; if that fails and the server still offers `keyboard-interactive`, the same secret is used there (typical on Arista). If no password is given, the first `IdentityFile` is used, otherwise the CLI walks identities from `ssh-agent`.
 
 `HostName`, `Port`, `User`, `IdentityFile`, `Compression`, `TCPKeepAlive` + `ServerAliveInterval`, algorithm prefs (`Ciphers`, `KexAlgorithms`, `MACs`, `HostKeyAlgorithms`), `UserKnownHostsFile`, and `ProxyJump` (any number of hops) are read from `~/.ssh/config`. Each jump authenticates with its own `IdentityFile` or the agent — the device password is not reused. Host keys default to `accept-new`: unknown hosts are pinned into `UserKnownHostsFile` or `~/.ssh/known_hosts`, a later key change is rejected. `--strict-host-key-checking yes` rejects unknown hosts too. `--strict-host-key-checking no` accepts any key.
 
@@ -196,8 +196,8 @@ Replies go to **stdout**. Logs go to **stderr**, so `> reply.xml` is just the do
 
 | Flag | Effect |
 |---|---|
-| `--format xml` | raw reply (default) |
-| `--format pretty` | indented XML |
+| `--format pretty` | indented XML (default) |
+| `--format xml` | raw reply |
 | `--format pretty,unescape` | decode entities, then pretty-print |
 | `--format json` | XML → JSON |
 | `--format json,pretty` | indented JSON |

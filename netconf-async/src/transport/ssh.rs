@@ -8,13 +8,13 @@ use async_trait::async_trait;
 use core::fmt;
 use core::time::Duration;
 use log::{debug, trace, warn};
-use russh::client::{self, Handle};
+use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::AgentClient;
 use russh::keys::{
     self, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, known_hosts,
 };
-use russh::{Channel, ChannelMsg, ChannelStream, Disconnect, Preferred};
+use russh::{Channel, ChannelMsg, ChannelStream, Disconnect, MethodKind, Preferred};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,6 +25,9 @@ use zeroize::Zeroizing;
 
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Cap on SSH_MSG_USERAUTH_INFO_REQUEST rounds ([RFC 4256](https://www.rfc-editor.org/rfc/rfc4256.html)).
+const MAX_KEYBOARD_INTERACTIVE_ROUNDS: usize = 5;
+
 /// How to authenticate the SSH user.
 ///
 /// Passwords and key passphrases are overwritten on drop. Prefer
@@ -32,6 +35,11 @@ const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Clone, PartialEq, Eq)]
 pub enum SshAuth {
     /// Password authentication.
+    ///
+    /// Tries SSH `password`, then `keyboard-interactive`
+    /// ([RFC 4256](https://www.rfc-editor.org/rfc/rfc4256.html)) if the
+    /// server still offers it. Every keyboard-interactive prompt is answered
+    /// with this password.
     Password(Zeroizing<String>),
     /// Walk identities from the local ssh-agent until one is accepted.
     Agent,
@@ -46,6 +54,8 @@ pub enum SshAuth {
 
 impl SshAuth {
     /// Password authentication. Secret is overwritten on drop.
+    ///
+    /// Falls back to keyboard-interactive when the server still offers it.
     pub fn password(password: impl Into<String>) -> Self {
         Self::Password(Zeroizing::new(password.into()))
     }
@@ -1035,11 +1045,9 @@ async fn authenticate(
     auth: &SshAuth,
 ) -> NetconfClientResult<()> {
     let success = match auth {
-        SshAuth::Password(password) => session
-            .authenticate_password(username, password.as_str())
-            .await
-            .map_err(map_russh)?
-            .success(),
+        SshAuth::Password(password) => {
+            authenticate_with_password(session, username, password.as_str()).await?
+        }
         SshAuth::Agent => authenticate_agent(session, username).await?,
         SshAuth::KeyFile { path, passphrase } => {
             authenticate_key_file(
@@ -1057,6 +1065,75 @@ async fn authenticate(
         Err(NetconfClientError::new(format!(
             "SSH authentication failed for {username}@{host}:{port}"
         )))
+    }
+}
+
+async fn authenticate_with_password(
+    session: &mut Handle<ClientHandler>,
+    username: &str,
+    password: &str,
+) -> NetconfClientResult<bool> {
+    match session
+        .authenticate_password(username, password)
+        .await
+        .map_err(map_russh)?
+    {
+        AuthResult::Success => Ok(true),
+        AuthResult::Failure {
+            remaining_methods, ..
+        } => {
+            debug!("password authentication rejected; remaining {remaining_methods:?}");
+            if !remaining_methods.contains(&MethodKind::KeyboardInteractive) {
+                return Ok(false);
+            }
+            debug!("trying keyboard-interactive authentication");
+            authenticate_keyboard_interactive(session, username, password).await
+        }
+    }
+}
+
+fn keyboard_interactive_answers(prompt_count: usize, password: &str) -> Vec<String> {
+    vec![password.to_string(); prompt_count]
+}
+
+async fn authenticate_keyboard_interactive(
+    session: &mut Handle<ClientHandler>,
+    username: &str,
+    password: &str,
+) -> NetconfClientResult<bool> {
+    let mut response = session
+        .authenticate_keyboard_interactive_start(username, None)
+        .await
+        .map_err(map_russh)?;
+    let mut rounds = 0;
+    loop {
+        match response {
+            KeyboardInteractiveAuthResponse::Success => return Ok(true),
+            KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
+            KeyboardInteractiveAuthResponse::InfoRequest {
+                name,
+                instructions,
+                prompts,
+            } => {
+                if rounds >= MAX_KEYBOARD_INTERACTIVE_ROUNDS {
+                    return Err(NetconfClientError::new(
+                        "SSH keyboard-interactive authentication exceeded prompt rounds",
+                    ));
+                }
+                trace!(
+                    "keyboard-interactive round {rounds}: name={name:?} instructions={instructions:?} prompts={}",
+                    prompts.len()
+                );
+                rounds += 1;
+                response = session
+                    .authenticate_keyboard_interactive_respond(keyboard_interactive_answers(
+                        prompts.len(),
+                        password,
+                    ))
+                    .await
+                    .map_err(map_russh)?;
+            }
+        }
     }
 }
 
@@ -1455,5 +1532,14 @@ mod tests {
             SshJump::new("jump2", 2222, "u2", SshAuth::Agent),
         ];
         assert_eq!(format_jump_hops(&hops), "jump1:22 -> jump2:2222");
+    }
+
+    #[test]
+    fn keyboard_interactive_answers_repeats_the_password() {
+        assert!(keyboard_interactive_answers(0, "secret").is_empty());
+        assert_eq!(
+            keyboard_interactive_answers(2, "secret"),
+            vec!["secret".to_string(), "secret".to_string()]
+        );
     }
 }

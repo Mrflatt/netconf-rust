@@ -53,8 +53,11 @@ when you are done: a clean shutdown has to await I/O, which [`Drop`] cannot do, 
 dropping an open session only logs a warning.
 
 [`SshTransport::connect`] takes [`SshAuth`] (password, agent, or key file) and an
-optional ProxyJump chain. Host-key policy defaults to [`HostKeyPolicy::RejectAll`];
-pin a fingerprint with [`HostKeyPolicy::Fingerprint`] or an OpenSSH file with
+optional ProxyJump chain. [`SshAuth::password`] tries SSH `password`, then
+`keyboard-interactive` with the same secret if the server still offers it.
+Host-key policy
+defaults to [`HostKeyPolicy::RejectAll`]; pin a fingerprint with
+[`HostKeyPolicy::Fingerprint`] or an OpenSSH file with
 [`HostKeyPolicy::KnownHosts`] / [`HostKeyPolicy::AcceptNew`]. Share a [`JumpPool`]
 when many devices use the same hops.
 

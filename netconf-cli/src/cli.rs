@@ -192,9 +192,9 @@ See '<cyan,bold>netconf-cli help</> <cyan><<command>></>' for more information o
                 .global(true),
             Arg::new("format")
                 .long("format")
-                .help("Reply format: xml (default) or json, plus pretty, unescape (comma-separated)")
+                .help("Reply format: pretty XML (default), or json, xml, unescape (comma-separated)")
                 .value_parser(crate::output::parse_format)
-                .default_value("xml")
+                .default_value("pretty")
                 .global(true),
             Arg::new("output-dir")
                 .long("output-dir")
@@ -330,6 +330,26 @@ fn parallel_defaults_to_cpu_count() {
     let (_, args) = matches.remove_subcommand().unwrap();
     let cfg = CliConfig::new(args).unwrap();
     assert!(cfg.inner.parallel >= 1, "{}", cfg.inner.parallel);
+}
+
+#[test]
+fn format_defaults_to_pretty_xml() {
+    use crate::config::CliConfig;
+    use crate::output::{Format, FormatKind};
+
+    let mut matches = cli()
+        .try_get_matches_from(["netconf", "--host", "192.0.2.10", "get-config"])
+        .unwrap();
+    let (_, args) = matches.remove_subcommand().unwrap();
+    let cfg = CliConfig::new(args).unwrap();
+    assert_eq!(
+        cfg.inner.output.format_for_test(),
+        &Format {
+            kind: FormatKind::Xml,
+            pretty: true,
+            unescape: false,
+        }
+    );
 }
 
 #[test]
