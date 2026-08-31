@@ -157,6 +157,7 @@ pub fn cli() -> Command {
     <cyan,bold>commit</>            Commit candidate or confirm/cancel persist commit
     <cyan,bold>rpc</>               Execute raw rpc
     <cyan,bold>notification</>      Start netconf notification listener
+    <cyan,bold>mcp</>               Start an MCP server for NETCONF operations
     <cyan,bold>update</>            Update netconf-cli from GitHub releases
 
 See '<cyan,bold>netconf-cli help</> <cyan><<command>></>' for more information on a specific command.\n",
@@ -224,6 +225,7 @@ See '<cyan,bold>netconf-cli help</> <cyan><<command>></>' for more information o
                 .global(true),
         ])
         .subcommands(builtin())
+        .subcommand(crate::commands::mcp::cli())
         .subcommand(crate::commands::update::cli())
 }
 

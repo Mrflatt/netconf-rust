@@ -292,6 +292,8 @@ pub enum RpcOperation {
     Commit(Commit),
     /// `<create-subscription>`.
     CreateSubscription(CreateSubscription),
+    /// `<get-schema>` ([RFC6022 3.1](https://www.rfc-editor.org/rfc/rfc6022.html#section-3.1)).
+    GetSchema(GetSchema),
 }
 
 impl RpcOperation {
@@ -312,6 +314,7 @@ impl RpcOperation {
             Self::CancelCommit(_) => "cancel-commit",
             Self::Commit(_) => "commit",
             Self::CreateSubscription(_) => "create-subscription",
+            Self::GetSchema(_) => "get-schema",
         }
     }
 
@@ -445,6 +448,38 @@ impl RpcOperation {
     /// `<cancel-commit>` ([RFC6241 8.4.4.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-8.4.4.1)).
     pub fn new_cancel_commit(persist_id: Option<String>) -> RpcOperation {
         RpcOperation::CancelCommit(CancelCommit { persist_id })
+    }
+
+    /// `<get-schema>` ([RFC6022 3.1](https://www.rfc-editor.org/rfc/rfc6022.html#section-3.1)).
+    ///
+    /// `identifier` is required. `format` defaults to `yang`. Empty `version`
+    /// is omitted.
+    pub fn new_get_schema(
+        identifier: &str,
+        version: Option<&str>,
+        format: Option<&str>,
+    ) -> error::NetconfClientResult<RpcOperation> {
+        let identifier = identifier.trim();
+        if identifier.is_empty() {
+            return Err(error::NetconfClientError::new(
+                "get-schema identifier is required (RFC6022 3.1)",
+            ));
+        }
+        let version = version
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let format = format
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("yang")
+            .to_string();
+        Ok(RpcOperation::GetSchema(GetSchema {
+            xmlns: crate::NETCONF_MONITORING_NS.to_string(),
+            identifier: identifier.to_string(),
+            version,
+            format,
+        }))
     }
 
     /// Verbatim payloads to splice back in after serialization.
@@ -1184,6 +1219,18 @@ pub fn replay_window(
     Ok((format_date_time(start)?, format_date_time(stop)?))
 }
 
+/// `<get-schema>` body ([RFC6022 3.1](https://www.rfc-editor.org/rfc/rfc6022.html#section-3.1)).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct GetSchema {
+    #[serde(rename = "@xmlns")]
+    xmlns: String,
+    identifier: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    format: String,
+}
+
 /// `<create-subscription>` body ([RFC5277 2.1.1](https://www.rfc-editor.org/rfc/rfc5277.html#section-2.1.1)).
 #[derive(Debug, Serialize)]
 pub struct CreateSubscription {
@@ -1713,6 +1760,49 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("earlier than startTime"), "{err}");
+    }
+
+    #[test]
+    fn test_serialize_get_schema() {
+        let expected = r#"
+<rpc message-id="c1be0e7f-3cbc-413f-8aa8-18ed663221d4" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <get-schema xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring">
+    <identifier>ietf-interfaces</identifier>
+    <format>yang</format>
+  </get-schema>
+</rpc>
+"#;
+        assert_eq!(
+            rpc(RpcOperation::new_get_schema("ietf-interfaces", None, None).unwrap()).to_string(),
+            expected.trim()
+        );
+    }
+
+    #[test]
+    fn test_serialize_get_schema_version_and_format() {
+        let expected = r#"
+<rpc message-id="c1be0e7f-3cbc-413f-8aa8-18ed663221d4" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <get-schema xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring">
+    <identifier>ietf-interfaces</identifier>
+    <version>2018-02-20</version>
+    <format>yin</format>
+  </get-schema>
+</rpc>
+"#;
+        assert_eq!(
+            rpc(
+                RpcOperation::new_get_schema("ietf-interfaces", Some("2018-02-20"), Some("yin"),)
+                    .unwrap()
+            )
+            .to_string(),
+            expected.trim()
+        );
+    }
+
+    #[test]
+    fn get_schema_requires_identifier() {
+        let err = RpcOperation::new_get_schema("  ", None, None).unwrap_err();
+        assert!(err.to_string().contains("identifier is required"), "{err}");
     }
 
     #[test]

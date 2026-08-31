@@ -18,7 +18,9 @@ cargo test -p netconf-cli parse_jump_spec_variants
 cargo build --workspace
 cargo update -p netconf-async --locked   # CI lockfile check
 cargo update -p netconf-cli --locked
+cargo update -p netconf-mcp --locked
 cargo run -p netconf-cli -- --help
+cargo test -p netconf-mcp
 ```
 
 SSH is `russh` (pure Rust). No OpenSSL.
@@ -43,6 +45,10 @@ Unit tests live next to the code they cover, under `#[cfg(test)]`. Session-level
 | `netconf-cli` | `src/inventory.rs` | `--host @file.csv`, delimiter, duplicate-IP var slices |
 | `netconf-cli` | `src/template.rs` | Go-template subset: field, `env`, `range`, trim |
 | `netconf-cli` | `src/update.rs` | tag parse, asset match, GitHub digest, archive extract, poller |
+| `netconf-cli` | `src/commands/mcp.rs` | `mcp` flags, CLI `DeviceConnect` (ssh_config / env / password) |
+| `netconf-mcp` | `src/host.rs` | `--allowed-subnet` CIDR parse / check |
+| `netconf-mcp` | `src/edit.rs` | lock → edit → validate → commit target select |
+| `netconf-mcp` | `src/server.rs` | wrap raw RPC, parse monitoring schemas |
 
 - Add a test for every new RPC variant, framer edge, host-string parse, or XML file/dir loader.
 - XML tests pin a fixed `message-id` and compare the full document with `pretty_assertions::assert_eq`.
@@ -93,17 +99,28 @@ cargo test -p netconf-async test_deserialize_rpc_reply -- --nocapture
             ├── commit.rs
             ├── rpc.rs
             ├── notification.rs
-            └── update.rs      # update subcommand (no device session)
+            ├── update.rs      # update subcommand (no device session)
+            └── mcp.rs         # mcp subcommand (no device session at start)
+└── netconf-mcp/               # MCP server library (stdio + optional HTTP)
+    └── src/
+        ├── lib.rs             # serve() + DeviceConnect
+        ├── config.rs          # McpConfig / McpTransport
+        ├── connect.rs         # ConnectParams + DeviceConnect
+        ├── host.rs            # allowed-subnet
+        ├── edit.rs            # lock/edit/validate/commit
+        ├── notification.rs    # listen-only subscription table
+        ├── types.rs           # tool input/output schemas
+        └── server.rs          # rmcp tools + stdio/HTTP
 ```
 
-Implemented `Connection` RPCs: `get`, `get-config`, `edit_config`, `copy_config`, `delete_config`, `lock`, `unlock`, `validate`, `commit`, `confirmed_commit`, `confirm_commit`, `cancel_commit`, `discard_changes`, `close_session`, `kill_session`, `raw_rpc`, `create_subscription`, `recv_notification` / `drain_notifications`, `notification` (listen loop; RFC 5277).
+Implemented `Connection` RPCs: `get`, `get-config`, `get_schema`, `edit_config`, `copy_config`, `delete_config`, `lock`, `unlock`, `validate`, `commit`, `confirmed_commit`, `confirm_commit`, `cancel_commit`, `discard_changes`, `close_session`, `kill_session`, `raw_rpc`, `create_subscription`, `recv_notification` / `drain_notifications`, `notification` (listen loop; RFC 5277).
 
-Implemented CLI subcommands: `get`, `get-config`, `edit`, `copy`, `commit`, `rpc`, `notification`, `update`.
-`edit` orchestrates lock → edit-config (all `--file` XML, name order) → validate → commit once → unlock → optional running→startup copy. `rpc` executes each `--file` XML in name order. `commit` confirms or cancels a persist confirmed-commit. `update` polls GitHub releases and does not open a device session.
+Implemented CLI subcommands: `get`, `get-config`, `edit`, `copy`, `commit`, `rpc`, `notification`, `mcp`, `update`.
+`edit` orchestrates lock → edit-config (all `--file` XML, name order) → validate → commit once → unlock → optional running→startup copy. `rpc` executes each `--file` XML in name order. `commit` confirms or cancels a persist confirmed-commit. `mcp` starts the MCP server (stdio or streamable HTTP) and does not require `--host`. `update` polls GitHub releases and does not open a device session.
 
 ## Stack
 
-- Rust **edition 2024**, workspace resolver **3**. `rust-version = "1.85"` on `netconf-async`; CI uses current stable.
+- Rust **edition 2024**, workspace resolver **3**. `rust-version = "1.85"` on `netconf-async`; `1.88` on `netconf-mcp` (rmcp). CI uses current stable.
 - Tokio 1 (multi-thread). Traits use `async-trait`.
 - XML via `quick-xml` + `serde` (derive feature). Substring search via `memchr`.
 - SSH: `russh` (tokio) inside the library only. CLI parses `~/.ssh/config` with `ssh2-config` and calls `SshTransport::connect`.

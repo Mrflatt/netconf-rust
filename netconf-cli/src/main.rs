@@ -79,6 +79,9 @@ async fn try_main() -> NetconfClientResult<bool> {
             if cmd == "update" {
                 commands::update::exec(&args).await?;
                 Ok(true)
+            } else if cmd == "mcp" {
+                commands::mcp::exec(&args).await?;
+                Ok(true)
             } else {
                 let cli_config = CliConfig::new(args)?;
                 cli::exec(cmd.to_owned(), cli_config).await
