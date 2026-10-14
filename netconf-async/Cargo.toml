@@ -1,6 +1,6 @@
 [package]
 name = "netconf-async"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Lauri Huotari <65590793+Mrflatt@users.noreply.github.com>"]
