@@ -46,6 +46,8 @@ pub const VALIDATE_CAP: &str = "urn:ietf:params:netconf:capability:validate:1.1"
 pub const WITH_DEFAULTS_CAP: &str = "urn:ietf:params:netconf:capability:with-defaults:1.0";
 /// `:notification:1.0` capability ([RFC5277](https://www.rfc-editor.org/rfc/rfc5277.html)).
 pub const NOTIFICATION_CAP: &str = "urn:ietf:params:netconf:capability:notification:1.0";
+/// ietf-netconf-monitoring namespace ([RFC6022](https://www.rfc-editor.org/rfc/rfc6022.html)).
+pub const NETCONF_MONITORING_NS: &str = "urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring";
 /// `:interleave:1.0` capability — RPCs on a session with an active subscription ([RFC5277](https://www.rfc-editor.org/rfc/rfc5277.html#section-6)).
 pub const INTERLEAVE_CAP: &str = "urn:ietf:params:netconf:capability:interleave:1.0";
 /// Default NETCONF-over-SSH port ([RFC6242](https://www.rfc-editor.org/rfc/rfc6242.html)).

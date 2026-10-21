@@ -112,7 +112,7 @@ fn user_ssh_config_path() -> PathBuf {
     path
 }
 
-fn load_ssh_config() -> Option<SshConfig> {
+pub(crate) fn load_ssh_config() -> Option<SshConfig> {
     merge_ssh_configs(
         read_ssh_config(&user_ssh_config_path()),
         read_ssh_config(Path::new(SYSTEM_SSH_CONFIG)),
@@ -450,7 +450,7 @@ fn ssh_config_host_key_check(params: &HostParams) -> Option<HostKeyCheck> {
         .and_then(|value| parse_host_key_check(value))
 }
 
-fn parse_host_key_check(value: &str) -> Option<HostKeyCheck> {
+pub(crate) fn parse_host_key_check(value: &str) -> Option<HostKeyCheck> {
     match value.to_ascii_lowercase().as_str() {
         "yes" | "true" | "ask" => Some(HostKeyCheck::Strict),
         "accept-new" | "acceptnew" => Some(HostKeyCheck::AcceptNew),

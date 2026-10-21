@@ -89,6 +89,7 @@ Default NETCONF-over-SSH port is **830**.
 | Method | Operation |
 |---|---|
 | `get` | `<get>` |
+| `get_schema` | `<get-schema>` ([RFC 6022](https://www.rfc-editor.org/rfc/rfc6022.html)); list schemas with `get` + the monitoring `<schemas/>` filter |
 | `get_config` | `<get-config>` |
 | `edit_config` | `<edit-config>` |
 | `copy_config` | `<copy-config>` |
@@ -106,6 +107,15 @@ Default NETCONF-over-SSH port is **830**.
 Subtree filters and `with-defaults` ([RFC 6243](https://www.rfc-editor.org/rfc/rfc6243.html))
 are supported on `get` / `get-config`. `has_capability` reflects the server
 `<hello>` (query string ignored).
+
+`get_schema` needs [RFC 6022](https://www.rfc-editor.org/rfc/rfc6022.html)
+monitoring. There is no typed list-schemas RPC; use `get` with:
+
+```xml
+<netconf-state xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring">
+  <schemas/>
+</netconf-state>
+```
 
 Filter and `<config>` payloads reach the device byte for byte; everything the
 crate generates around them stays XML-escaped. [`RpcReply::errors`] exposes each

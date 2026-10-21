@@ -56,6 +56,8 @@ jobs:
         run: cargo update -p netconf-async --locked
       - name: Check netconf-cli lockfile
         run: cargo update -p netconf-cli --locked
+      - name: Check netconf-mcp lockfile
+        run: cargo update -p netconf-mcp --locked
 
   # Default builds pull tokio/io-util in transitively, so a broken feature gate
   # only shows up once someone opts out of a default feature.

@@ -178,6 +178,29 @@ impl Connection {
         self.run_rpc(get).await
     }
 
+    /// `<get-schema>` ([RFC6022 3.1](https://www.rfc-editor.org/rfc/rfc6022.html#section-3.1)).
+    ///
+    /// Requires [`crate::NETCONF_MONITORING_NS`] in the server `<hello>`.
+    /// `format` defaults to `yang`.
+    ///
+    /// List available schemas with [`Self::get`] and this subtree filter:
+    ///
+    /// ```xml
+    /// <netconf-state xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring">
+    ///   <schemas/>
+    /// </netconf-state>
+    /// ```
+    pub async fn get_schema(
+        &mut self,
+        identifier: &str,
+        version: Option<&str>,
+        format: Option<&str>,
+    ) -> NetconfClientResult<String> {
+        let rpc =
+            Rpc::new_with_operation(RpcOperation::new_get_schema(identifier, version, format)?);
+        self.run_rpc(rpc).await
+    }
+
     /// `<validate>` ([RFC6241 8.6.4.1](https://www.rfc-editor.org/rfc/rfc6241.html#section-8.6.4.1)).
     pub async fn validate(&mut self, datastore: Datastore) -> NetconfClientResult<String> {
         let validate = Rpc::new_with_operation(RpcOperation::Validate {
